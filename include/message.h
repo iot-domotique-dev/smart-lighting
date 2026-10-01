@@ -13,7 +13,13 @@ enum class MessageType {
 
     HEARTBEAT,
 
-    ACK
+    ACK,
+
+    DEVICE_ANNOUNCE,
+    PAIR_REQUEST,
+    PAIR_ACCEPT,
+    PAIR_CONFIRM,
+    PAIR_REJECT
 };
 
 
@@ -62,4 +68,14 @@ struct Message {
     MessageStatus status;
 
     ExecutionStatus executionStatus;
+
+    // V4 provisioning payload. Existing V3.9 messages leave these fields zeroed.
+    char hardwareId[32];
+    char name[32];
+    char firmwareVersion[16];
+    uint32_t parentMainId;
+    uint32_t capabilities;
+    uint32_t provisioningDeviceId;
+    uint8_t deviceRole;
+    uint8_t pairingState;
 };

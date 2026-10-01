@@ -12,3 +12,9 @@ Le profil `native` utilise Unity et compile les modules testés avec un faux `Ar
 Les tests couvrent les capacités des registres, les valeurs de luminosité, les ACK/retries/timeouts, la réutilisation du tracker, la déduplication par `(sourceId, messageId)` et son éviction circulaire, les limites d'automatisation, les modes `ONCE`/`REPEAT` et les événements de changement de statut.
 
 Les scénarios de démonstration Wokwi restent disponibles dans l'environnement PlatformIO `lamp`.
+
+## V4 native suite
+
+The test_v4_pairing suite contains 14 MAIN/LAMP provisioning cases: announcement over the existing SimulationTransport, discovery without automatic pairing, explicit commissioning, identity assignment and persistence, confirmation, reboot recovery, cross-MAIN rejection, registry duplicate checks, lookup and removal.
+
+The command pio test -e native runs both native test suites: the 9 V3.9 stabilization tests and the 14 V4 pairing tests.

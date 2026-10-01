@@ -1,5 +1,8 @@
 # Smart Lighting
 
+La préparation du provisioning V4 MAIN ↔ LAMP est décrite dans
+[`V4_PAIRING.md`](V4_PAIRING.md).
+
 Système d'éclairage intelligent modulaire basé sur ESP32, conçu pour évoluer progressivement vers une architecture domotique distribuée utilisant Zigbee.
 
 Le projet est développé avec **PlatformIO / VS Code** et utilise actuellement **Wokwi** pour les simulations.

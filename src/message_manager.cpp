@@ -23,6 +23,21 @@ const char* messageTypeToString(
 
         case MessageType::ACK:
             return "ACK";
+
+        case MessageType::DEVICE_ANNOUNCE:
+            return "DEVICE_ANNOUNCE";
+
+        case MessageType::PAIR_REQUEST:
+            return "PAIR_REQUEST";
+
+        case MessageType::PAIR_ACCEPT:
+            return "PAIR_ACCEPT";
+
+        case MessageType::PAIR_CONFIRM:
+            return "PAIR_CONFIRM";
+
+        case MessageType::PAIR_REJECT:
+            return "PAIR_REJECT";
     }
 
     return "UNKNOWN";

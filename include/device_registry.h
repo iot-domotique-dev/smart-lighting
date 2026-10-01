@@ -25,10 +25,32 @@ Lamp* findLamp(
     uint32_t id
 );
 
+Lamp* findLampByDeviceId(
+    LampRegistry& registry,
+    uint32_t deviceId
+);
+
 
 bool addLamp(
     LampRegistry& registry,
     const Lamp& lamp
+);
+
+Lamp* findLampByHardwareId(
+    LampRegistry& registry,
+    const char* hardwareId
+);
+
+uint8_t findLampsByParentMainId(
+    LampRegistry& registry,
+    uint32_t parentMainId,
+    Lamp** matches,
+    uint8_t capacity
+);
+
+bool removeLamp(
+    LampRegistry& registry,
+    uint32_t deviceId
 );
 
 
