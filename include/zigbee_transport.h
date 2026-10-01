@@ -2,62 +2,24 @@
 
 #include "communication_transport.h"
 
-
 /*
- * ============================================================
- * ZIGBEE TRANSPORT
- * ============================================================
- *
- * V3.9 :
- * ----------
- * Architecture préparée.
- *
- * L'implémentation réelle sera réalisée sur ESP32-C6/H2
- * avec la stack Zigbee d'Espressif.
- *
- * La bibliothèque Arduino ESP32 fournit déjà :
- *
- * - Coordinator
- * - Router
- * - End Device
- * - commissioning
- * - network management
- * - endpoints
- * - OTA
- * - groups
- * - binding
- *
- * Voir documentation Espressif.
+ * CommunicationTransportInterface adapter for Espressif's ESP-Zigbee SDK.
+ * The SDK implementation is compiled only by the ESP32-C6 IDF environments.
+ * Arduino/native builds keep the type available but do not emulate Zigbee.
  */
-
-class ZigbeeTransport
-    : public CommunicationTransportInterface {
-
+class ZigbeeTransport : public CommunicationTransportInterface {
 private:
-
-    bool ready;
-
+    volatile bool started;
 
 public:
-
     ZigbeeTransport();
 
-
     bool begin() override;
-
-
-    bool send(
-        const Message& message
-    ) override;
-
-
-    bool receive(
-        Message& message
-    ) override;
-
-
+    bool send(const Message& message) override;
+    bool receive(Message& message) override;
     bool isReady() const override;
-
-
     const char* name() const override;
+
+    /* Used by the SDK worker after esp_zigbee_start() succeeds. */
+    void markStackStarted();
 };

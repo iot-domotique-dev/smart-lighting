@@ -236,7 +236,16 @@ int8_t MainProvisioning::findDiscovered(const char* hardwareIdValue) const {
 
 uint32_t MainProvisioning::findAvailableDeviceId() const {
     for (uint32_t candidate = 1; candidate != 0; ++candidate) {
-        if (findLamp(registry, candidate) == nullptr) {
+        bool reservedByDiscoveredPairedDevice = false;
+        for (uint8_t i = 0; i < discoveredCount; ++i) {
+            if (discovered[i].pairingState == PairingState::PAIRED &&
+                discovered[i].deviceId == candidate) {
+                reservedByDiscoveredPairedDevice = true;
+                break;
+            }
+        }
+        if (findLamp(registry, candidate) == nullptr &&
+            !reservedByDiscoveredPairedDevice) {
             return candidate;
         }
     }

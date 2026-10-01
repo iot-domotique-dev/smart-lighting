@@ -1,6 +1,7 @@
 #include <Arduino.h>
 
 #include "lamp_controller.h"
+#include "lamp_hardware.h"
 
 
 void setLampPower(
@@ -9,6 +10,7 @@ void setLampPower(
 ) {
 
     lamp.state.power = state;
+    writeLampHardwarePower(state);
 
     Serial.print("Power -> ");
     Serial.println(

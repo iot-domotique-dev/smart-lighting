@@ -9,6 +9,17 @@
 
 struct EventBus;
 
+using ApplicationMessageHandler = bool (*)(
+    Communication& communication,
+    const Message& message,
+    void* context
+);
+
+void registerApplicationMessageHandler(
+    ApplicationMessageHandler handler,
+    void* context
+);
+
 
 void processMessages(
     Communication& communication,

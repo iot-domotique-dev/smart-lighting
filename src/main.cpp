@@ -2,6 +2,7 @@
 
 #include "device_registry.h"
 #include "device_identity.h"
+#include "roles.h"
 #include "group_manager.h"
 #include "scene_manager.h"
 #include "automation_manager.h"
@@ -14,6 +15,13 @@
 #include "message_id_generator.h"
 #include "device_manager.h"
 #include "message_deduplicator.h"
+#include "v5_provisioning_runtime.h"
+#include "lamp_hardware.h"
+#include "v5_console.h"
+
+#if defined(SMART_LIGHTING_ZIGBEE)
+#include "nvs_provisioning_store.h"
+#endif
 
 
 /*
@@ -46,6 +54,20 @@ Communication communication;
 MessageTracker messageTracker;
 
 MessageDeduplicator messageDeduplicator;
+
+V5ProvisioningRuntime v5ProvisioningRuntime(
+    communication,
+    lampRegistry,
+    messageTracker
+);
+
+bool commissionLampV5(const char* hardwareId, const char* requestedName) {
+    return v5ProvisioningRuntime.commissionLamp(hardwareId, requestedName);
+}
+
+bool setLampPowerV5(uint32_t deviceId, bool enabled) {
+    return v5ProvisioningRuntime.setPower(deviceId, enabled);
+}
 
 
 /*
@@ -208,6 +230,8 @@ void setup() {
         115200
     );
 
+    initializeLampHardware();
+
 
     delay(
         1000
@@ -272,7 +296,11 @@ void setup() {
 
     initCommunication(
         communication,
+#if defined(SMART_LIGHTING_ZIGBEE)
+        CommunicationTransportType::ZIGBEE,
+#else
         CommunicationTransportType::SIMULATION,
+#endif
         DEVICE_LOCAL_ID
     );
 
@@ -285,6 +313,16 @@ void setup() {
     initMessageDeduplicator(
         messageDeduplicator
     );
+
+#if defined(SMART_LIGHTING_ZIGBEE)
+    static NvsProvisioningStore lampProvisioningStore;
+    if (DEVICE_ROLE == DeviceRole::LAMP) {
+        (void)v5ProvisioningRuntime.begin(DEVICE_ROLE, &lampProvisioningStore);
+    } else {
+        (void)v5ProvisioningRuntime.begin(DEVICE_ROLE);
+    }
+    startV5Console();
+#endif
 
 
     printCommunicationStatus(
@@ -581,6 +619,7 @@ void setup() {
  */
 
 void loop() {
+    v5ProvisioningRuntime.poll();
 #if defined(SMART_LIGHTING_DEMO)
 
     /*

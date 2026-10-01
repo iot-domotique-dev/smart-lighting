@@ -7,6 +7,19 @@
 #include "device_manager.h"
 #include "event_bus.h"
 
+namespace {
+ApplicationMessageHandler applicationMessageHandler = nullptr;
+void* applicationMessageContext = nullptr;
+}
+
+void registerApplicationMessageHandler(
+    ApplicationMessageHandler handler,
+    void* context
+) {
+    applicationMessageHandler = handler;
+    applicationMessageContext = context;
+}
+
 
 static bool isValidCommandType(
     int32_t commandType
@@ -150,6 +163,15 @@ void processMessages(
         printMessage(
             message
         );
+
+        if (applicationMessageHandler != nullptr &&
+            applicationMessageHandler(
+                communication,
+                message,
+                applicationMessageContext
+            )) {
+            continue;
+        }
 
 
         /*
