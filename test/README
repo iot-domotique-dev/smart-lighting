@@ -11,7 +11,7 @@ Le profil `native` utilise Unity et compile les modules testés avec un faux `Ar
 
 Les tests couvrent les capacités des registres, les valeurs de luminosité, les ACK/retries/timeouts, la réutilisation du tracker, la déduplication par `(sourceId, messageId)` et son éviction circulaire, les limites d'automatisation, les modes `ONCE`/`REPEAT` et les événements de changement de statut.
 
-Les scénarios de démonstration Wokwi restent disponibles dans l'environnement PlatformIO `lamp`.
+Les scénarios Wokwi ont été retirés avec les profils de lampe de démonstration. `SimulationTransport` reste utilisé par les tests natifs.
 
 ## V4 native suite
 

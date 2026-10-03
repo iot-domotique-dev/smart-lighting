@@ -12,9 +12,9 @@
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug",
-            "executable": "C:/Users/merve/Documents/GitHub/smart-lighting/.pio/build/lamp/firmware.elf",
-            "projectEnvName": "lamp",
-            "toolchainBinDir": "C:/Users/merve/.platformio/packages/toolchain-xtensa-esp32/bin",
+            "executable": "C:/Users/merve/Documents/GitHub/smart-lighting/.pio/build/lamp_c6/firmware.elf",
+            "projectEnvName": "lamp_c6",
+            "toolchainBinDir": "C:/Users/merve/.platformio/packages/toolchain-riscv32-esp/bin",
             "internalConsoleOptions": "openOnSessionStart",
             "preLaunchTask": {
                 "type": "PlatformIO",
@@ -25,18 +25,18 @@
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug (skip Pre-Debug)",
-            "executable": "C:/Users/merve/Documents/GitHub/smart-lighting/.pio/build/lamp/firmware.elf",
-            "projectEnvName": "lamp",
-            "toolchainBinDir": "C:/Users/merve/.platformio/packages/toolchain-xtensa-esp32/bin",
+            "executable": "C:/Users/merve/Documents/GitHub/smart-lighting/.pio/build/lamp_c6/firmware.elf",
+            "projectEnvName": "lamp_c6",
+            "toolchainBinDir": "C:/Users/merve/.platformio/packages/toolchain-riscv32-esp/bin",
             "internalConsoleOptions": "openOnSessionStart"
         },
         {
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug (without uploading)",
-            "executable": "C:/Users/merve/Documents/GitHub/smart-lighting/.pio/build/lamp/firmware.elf",
-            "projectEnvName": "lamp",
-            "toolchainBinDir": "C:/Users/merve/.platformio/packages/toolchain-xtensa-esp32/bin",
+            "executable": "C:/Users/merve/Documents/GitHub/smart-lighting/.pio/build/lamp_c6/firmware.elf",
+            "projectEnvName": "lamp_c6",
+            "toolchainBinDir": "C:/Users/merve/.platformio/packages/toolchain-riscv32-esp/bin",
             "internalConsoleOptions": "openOnSessionStart",
             "loadMode": "manual"
         }

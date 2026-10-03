@@ -11,7 +11,10 @@ enum class EventType {
     LAMP_OFFLINE,
 
     COMMAND_RECEIVED,
-    DEVICE_STATE_CHANGED
+    DEVICE_STATE_CHANGED,
+
+    DEVICE_ONLINE,
+    DEVICE_OFFLINE
 };
 
 struct Event {

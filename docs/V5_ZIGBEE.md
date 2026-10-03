@@ -2,7 +2,7 @@
 
 ## Portée actuelle
 
-Ce jalon remplace le stub Zigbee par un adaptateur utilisant l’ESP-Zigbee SDK officiel. Le MAIN forme le réseau; le LAMP est un routeur alimenté sur secteur qui rejoint le réseau. Le protocole métier V4 est transporté dans une trame APS dédiée. La simulation reste disponible dans les environnements existants.
+Ce jalon remplace le stub Zigbee par un adaptateur utilisant l’ESP-Zigbee SDK officiel. Le MAIN forme le réseau; le LAMP est un routeur alimenté sur secteur qui rejoint le réseau. Le protocole métier V4 est transporté dans une trame APS dédiée. La simulation `SimulationTransport` reste disponible pour les tests natifs.
 
 ```text
 Application V4 (annonce, pairing, commande, ACK)
@@ -112,7 +112,7 @@ Selon le rôle et l’état persistant, les lignes principales sont:
 
 **Implémenté dans le dépôt:** intégration réelle ESP-Zigbee SDK/APS dans la cible C6; formation/steering; codecs de `Message`; callback de réception et confirmations APS; discovery et pairing branchés aux classes V4; NVS pour l’identité pairing de LAMP; console de commissioning explicite; commande `SET_LAMP_POWER` sur le chemin ACK/retry existant; GPIO configurable et encapsulée.
 
-**Vérifié dans cet environnement:** `pio test -e native` passe avec 28 tests, dont les 23 tests V3/V4 déjà présents et les 5 tests du codec. Les builds `pio run -e main_light_c6` et `pio run -e lamp_c6` passent; les deux tables générées déclarent `zb_storage` en NVS et placent l’application à `0x20000`. Aucun test radio n’a été simulé comme test matériel. Le test radio nécessite deux ESP32-C6 physiques.
+**Vérifié à la livraison de V5:** `pio test -e native` passe avec 28 tests, dont les 23 tests V3/V4 déjà présents et les 5 tests du codec. Les builds `pio run -e main_light_c6` et `pio run -e lamp_c6` passent; les deux tables générées déclarent `zb_storage` en NVS et placent l’application à `0x20000`. Aucun test radio n’a été simulé comme test matériel. Le test radio nécessite deux ESP32-C6 physiques. Après les changements V6, le compilateur C6 de l'environnement actuel échoue pendant son test CMake avant de compiler les sources du projet; le build doit être vérifié de nouveau avec un toolchain fonctionnel.
 
 **Pas encore vérifié:** formation/join radio; réception APS; pairing et reconnexion après coupure; ACK/retry sur radio; comportement réel du port console; GPIO et LED; PWM. La communication radio et le GPIO de test restent à valider sur les deux cartes reçues. Il ne faut donc pas conclure que « Zigbee fonctionne » avant ces essais.
 

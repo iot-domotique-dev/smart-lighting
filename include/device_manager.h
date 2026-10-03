@@ -18,3 +18,8 @@ void updateDeviceStatus(
     LampRegistry& registry,
     EventBus* eventBus = nullptr
 );
+
+void updateDeviceStatus(
+    DeviceRegistry& registry,
+    EventBus* eventBus = nullptr
+);

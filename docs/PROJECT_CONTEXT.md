@@ -1,4 +1,6 @@
-# Smart Lighting --- Contexte du projet
+# Smart Lighting --- Contexte historique du projet
+
+> Ce document décrit l'architecture avant V5. Les profils `lamp`, `lamp_a` et `lamp_b` sont retirés; la lampe actuelle est `lamp_c6`. Voir `README.md` pour l'état courant.
 
 ## 1. Objectif
 
@@ -56,7 +58,7 @@ Architecture logique :
 -   Arduino framework
 -   PlatformIO
 -   VS Code
--   Wokwi pour la simulation
+-   `SimulationTransport` pour les tests natifs
 -   C++
 -   Repository GitHub : `smart-lighting`
 
@@ -64,7 +66,7 @@ Configuration principale :
 
 ``` ini
 [platformio]
-default_envs = lamp
+default_envs = lamp_c6
 
 [env]
 platform = espressif32
@@ -77,10 +79,7 @@ Environnements :
 
 -   `core`
 -   `main`
--   `lamp`
 -   `relay`
--   `lamp_a`
--   `lamp_b`
 
 ------------------------------------------------------------------------
 

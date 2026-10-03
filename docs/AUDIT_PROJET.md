@@ -1,3 +1,5 @@
+> Archive: cet audit décrit un état antérieur au nettoyage pré-V7. Les profils `lamp`, `lamp_a` et `lamp_b` et la simulation Wokwi cités ci-dessous ont depuis été supprimés; `lamp_c6` est le firmware de lampe maintenu.
+
 ﻿# Audit du projet Smart Lighting
 
 **Date :** 25 septembre 2026  
@@ -23,7 +25,7 @@ Les environnements `lamp_a` et `lamp_b` ne définissent respectivement que `DEVI
 
 En outre, `DEVICE_ROLE` n’est pas consommé dans les autres sources : les profils `core`, `main`, `lamp` et `relay` sélectionnent une constante de rôle, mais ne sélectionnent pas de comportement de firmware distinct. Tous héritent du même `board = esp32dev`.
 
-**Correction :** les deux profils définissent `DEVICE_ROLE_LAMP`. `DEVICE_LAMP_A` et `DEVICE_LAMP_B` restent des marqueurs d’identité distincts qui déterminent les identifiants locaux 1 et 2 dans [device_identity.h](../include/device_identity.h). Les six builds ESP32 passent. Cette identité sert à initialiser l’ID de communication et à nommer l’instance ; en dehors de la démo Wokwi, le firmware n’ajoute pas encore une lampe locale au registre et ne commande pas de sortie physique.
+**Correction à l'époque :** les deux profils définissaient `DEVICE_ROLE_LAMP`. `DEVICE_LAMP_A` et `DEVICE_LAMP_B` déterminaient les identifiants locaux 1 et 2. Ces profils et leur logique d'identité ont été retirés au nettoyage pré-V7; `lamp_c6` est la seule cible lampe actuelle.
 
 ### A-02 — Saturation définitive du suivi après vingt messages — corrigé
 
@@ -89,7 +91,7 @@ Ces éléments sont annoncés comme futurs dans la documentation ; ils ne sont p
 
 - [ZigbeeTransport](../src/zigbee_transport.cpp) ne démarre pas de réseau : `begin()` retourne `false` et `send()`/`receive()` ne sont pas implémentés.
 - La configuration cible actuellement `esp32dev` dans [platformio.ini](../platformio.ini), tandis que la documentation prévoit un ESP32-C6 pour l’étape matérielle suivante.
-- Le [diagramme Wokwi](../diagram.json) ne contient qu’une carte ESP32 ; il ne modélise ni lampe commandée ni capteur. Le contrôleur de lampe ne pilote aucune broche physique.
+- Le diagramme Wokwi (supprimé au nettoyage pré-V7) ne contenait qu’une carte ESP32 ; il ne modélisait ni lampe commandée ni capteur.
 - Aucune validation de source ou de destination, protection contre la falsification au niveau applicatif, gestion de clés ou politique d’autorisation n’est visible dans le routeur de commandes. Le transport réel et ses mécanismes de sécurité restent à concevoir et à vérifier avant toute commande sur réseau.
 - En dehors de `SMART_LIGHTING_DEMO`, `lamp_a` et `lamp_b` ne créent pas encore d’entrée locale dans `lampRegistry`. Leurs identifiants de communication sont distincts, mais l’état de lampe local et son pilotage matériel ne sont pas implémentés.
 - Les événements ONLINE/OFFLINE sont produits et traités comme des journaux. Les événements de capteurs qui déclencheraient `processAutomations()` n’ont pas encore de producteur dans le firmware applicatif.

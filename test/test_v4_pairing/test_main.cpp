@@ -51,7 +51,7 @@ void test_unconfigured_lamp_announces_identity_through_simulation_transport() {
         static_cast<int>(announcement.type)
     );
     TEST_ASSERT_EQUAL_STRING("HW-ABC123", announcement.hardwareId);
-    TEST_ASSERT_EQUAL_STRING("0.4.0", announcement.firmwareVersion);
+    TEST_ASSERT_EQUAL_STRING("", announcement.firmwareVersion);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(DeviceRole::LAMP),
                           static_cast<int>(announcement.role));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(PairingState::UNPAIRED),
@@ -68,7 +68,7 @@ void test_unconfigured_lamp_announces_identity_through_simulation_transport() {
     ProvisioningPacket decoded = {};
     TEST_ASSERT_TRUE(decodeProvisioningPacket(received, decoded));
     TEST_ASSERT_EQUAL_STRING("HW-ABC123", decoded.hardwareId);
-    TEST_ASSERT_EQUAL_STRING("0.4.0", decoded.firmwareVersion);
+    TEST_ASSERT_EQUAL_STRING("", decoded.firmwareVersion);
     TEST_ASSERT_EQUAL_UINT32(0x05, decoded.capabilities);
 }
 

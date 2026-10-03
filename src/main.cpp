@@ -1,7 +1,7 @@
 #include <Arduino.h>
 
 #include "device_registry.h"
-#include "device_identity.h"
+#include "core_module_service.h"
 #include "roles.h"
 #include "group_manager.h"
 #include "scene_manager.h"
@@ -12,7 +12,6 @@
 #include "communication.h"
 #include "message_tracker.h"
 #include "message_router.h"
-#include "message_id_generator.h"
 #include "device_manager.h"
 #include "message_deduplicator.h"
 #include "v5_provisioning_runtime.h"
@@ -23,6 +22,20 @@
 #include "nvs_provisioning_store.h"
 #endif
 
+namespace {
+const char* roleName(DeviceRole role) {
+    switch (role) {
+        case DeviceRole::CORE: return "CORE";
+        case DeviceRole::MAIN: return "MAIN";
+        case DeviceRole::LAMP: return "LAMP";
+        case DeviceRole::RELAY: return "RELAY";
+        case DeviceRole::SENSOR: return "SENSOR";
+        case DeviceRole::CAMERA: return "CAMERA";
+    }
+    return "UNKNOWN";
+}
+}  // namespace
+
 
 /*
  * ============================================================
@@ -31,6 +44,10 @@
  */
 
 LampRegistry lampRegistry;
+
+#if defined(DEVICE_ROLE_CORE)
+DeviceRegistry coreDeviceRegistry;
+#endif
 
 GroupRegistry groupRegistry;
 
@@ -72,141 +89,6 @@ bool setLampPowerV5(uint32_t deviceId, bool enabled) {
 
 /*
  * ============================================================
- * TESTS
- * ============================================================
- */
-
-uint32_t timeoutMessageId = 0;
-
-uint32_t duplicateMessageId = 0;
-
-bool simulateCommunicationLoss = false;
-
-
-/*
- * ============================================================
- * SEND COMMAND
- * ============================================================
- */
-
-[[maybe_unused]] static uint32_t sendCommand(
-    uint32_t destinationId,
-    ActionType actionType,
-    int32_t value
-) {
-    Message command{};
-    command.id = generateMessageId();
-    command.sourceId = communication.localDeviceId;
-    command.destinationId = destinationId;
-    command.type = MessageType::COMMAND;
-    command.timestamp = millis();
-    command.commandType = static_cast<int32_t>(actionType);
-    command.value = value;
-    command.value2 = 0;
-    command.status = MessageStatus::PENDING;
-    command.executionStatus = ExecutionStatus::NOT_EXECUTED;
-
-
-    if (
-        !trackMessage(
-            messageTracker,
-            command
-        )
-    ) {
-
-        Serial.println(
-            "Erreur : impossible de suivre le message."
-        );
-
-        return 0;
-    }
-
-
-    if (
-        !sendMessage(
-            communication,
-            command
-        )
-    ) {
-
-        untrackMessage(
-            messageTracker,
-            command.id
-        );
-
-        Serial.println(
-            "Erreur : impossible d'envoyer le message."
-        );
-
-        return 0;
-    }
-
-
-    return command.id;
-}
-
-
-/*
- * ============================================================
- * SIMULATION PERTE
- * ============================================================
- */
-
-[[maybe_unused]] static void simulateLostMessages() {
-
-    Message lostMessage;
-
-
-    while (
-        receiveMessage(
-            communication,
-            lostMessage
-        )
-    ) {
-
-        Serial.print(
-            "Message volontairement perdu : "
-        );
-
-
-        Serial.println(
-            lostMessage.id
-        );
-    }
-}
-
-
-/*
- * ============================================================
- * PROCESS NORMAL
- * ============================================================
- */
-
-static void processNormalCommunication() {
-
-    processMessages(
-
-        communication,
-
-        messageTracker,
-
-        messageDeduplicator,
-
-        lampRegistry,
-
-        groupRegistry,
-
-        sceneRegistry,
-
-        false,
-
-        &eventBus
-    );
-}
-
-
-/*
- * ============================================================
  * SETUP
  * ============================================================
  */
@@ -232,11 +114,11 @@ void setup() {
     );
 
     Serial.println(
-        "       SMART LIGHTING V3.9"
+        "       SMART LIGHTING"
     );
 
-    Serial.print("Instance : ");
-    Serial.println(DEVICE_LOCAL_NAME);
+    Serial.print("Role : ");
+    Serial.println(roleName(DEVICE_ROLE));
 
     Serial.println(
         "================================"
@@ -252,6 +134,23 @@ void setup() {
     initLampRegistry(
         lampRegistry
     );
+
+#if defined(DEVICE_ROLE_CORE)
+    initDeviceRegistry(coreDeviceRegistry);
+    const Device coreDevice = {
+        CORE_LOGICAL_ID,
+        "CORE",
+        DeviceRole::CORE,
+        DeviceStatus::ONLINE,
+        millis(),
+        0,
+        0,
+        CORE_LOGICAL_ID
+    };
+    if (!registerDevice(coreDeviceRegistry, coreDevice)) {
+        Serial.println("[CORE] failed to register its root device");
+    }
+#endif
 
 
     initGroupRegistry(
@@ -288,7 +187,11 @@ void setup() {
 #else
         CommunicationTransportType::SIMULATION,
 #endif
-        DEVICE_LOCAL_ID
+#if defined(DEVICE_ROLE_CORE)
+        CORE_LOGICAL_ID
+#else
+        0
+#endif
     );
 
 
@@ -317,285 +220,7 @@ void setup() {
     );
 
 
-#if defined(SMART_LIGHTING_DEMO)
-    /*
-     * ========================================================
-     * LAMPES
-     * ========================================================
-     */
 
-    Lamp lamp1 = {
-
-        {
-            1,
-            "LAMP_01",
-            DeviceRole::LAMP,
-            DeviceStatus::ONLINE,
-            millis()
-        },
-
-        {
-            false,
-            0,
-            false
-        }
-    };
-
-
-    Lamp lamp2 = {
-
-        {
-            2,
-            "LAMP_02",
-            DeviceRole::LAMP,
-            DeviceStatus::ONLINE,
-            millis()
-        },
-
-        {
-            false,
-            0,
-            false
-        }
-    };
-
-
-    Lamp lamp3 = {
-
-        {
-            3,
-            "LAMP_03",
-            DeviceRole::LAMP,
-            DeviceStatus::OFFLINE,
-            millis()
-        },
-
-        {
-            false,
-            0,
-            false
-        }
-    };
-
-
-    addLamp(
-        lampRegistry,
-        lamp1
-    );
-
-
-    addLamp(
-        lampRegistry,
-        lamp2
-    );
-
-
-    addLamp(
-        lampRegistry,
-        lamp3
-    );
-
-
-    /*
-     * ========================================================
-     * GROUPE
-     * ========================================================
-     */
-
-    LampGroup entrance = {
-
-        1,
-
-        "ENTREE",
-
-        {},
-
-        0
-    };
-
-
-    addGroup(
-        groupRegistry,
-        entrance
-    );
-
-
-    addLampToGroup(
-        groupRegistry,
-        lampRegistry,
-        1,
-        1
-    );
-
-
-    addLampToGroup(
-        groupRegistry,
-        lampRegistry,
-        1,
-        2
-    );
-
-
-    addLampToGroup(
-        groupRegistry,
-        lampRegistry,
-        1,
-        3
-    );
-
-
-    /*
-     * ========================================================
-     * SCENE
-     * ========================================================
-     */
-
-    Scene evening = {
-
-        1,
-
-        "SOIR",
-
-        {},
-
-        0
-    };
-
-
-    addScene(
-        sceneRegistry,
-        evening
-    );
-
-
-    SceneAction powerAction = {
-
-        1,
-
-        CommandType::SET_GROUP_POWER,
-
-        1
-    };
-
-
-    addActionToScene(
-
-        sceneRegistry,
-
-        groupRegistry,
-
-        1,
-
-        powerAction
-    );
-
-
-    /*
-     * ========================================================
-     * TEST 1
-     * ========================================================
-     */
-
-    Serial.println();
-
-    Serial.println(
-        "================================"
-    );
-
-    Serial.println(
-        " TEST 1 : COMMAND + ACK"
-    );
-
-    Serial.println(
-        "================================"
-    );
-
-
-    simulateCommunicationLoss =
-        false;
-
-
-    uint32_t normalMessageId =
-        sendCommand(
-
-            1,
-
-            ActionType::SET_LAMP_POWER,
-
-            1
-        );
-
-
-    if (
-        normalMessageId != 0
-    ) {
-
-        processNormalCommunication();
-
-        processNormalCommunication();
-    }
-
-
-    Serial.println();
-
-    Serial.println(
-        "===== TRACKER TEST 1 ====="
-    );
-
-
-    printMessageTracker(
-        messageTracker
-    );
-
-
-    /*
-     * ========================================================
-     * TEST 2
-     * ========================================================
-     */
-
-    Serial.println();
-
-    Serial.println(
-        "================================"
-    );
-
-    Serial.println(
-        " TEST 2 : TIMEOUT + RETRIES"
-    );
-
-    Serial.println(
-        "================================"
-    );
-
-
-    simulateCommunicationLoss =
-        true;
-
-
-    timeoutMessageId =
-        sendCommand(
-
-            1,
-
-            ActionType::SET_LAMP_POWER,
-
-            0
-        );
-
-
-    Serial.print(
-        "Message timeout : "
-    );
-
-
-    Serial.println(
-        timeoutMessageId
-    );
-
-
-    simulateLostMessages();
-#endif
 }
 
 
@@ -607,238 +232,22 @@ void setup() {
 
 void loop() {
     v5ProvisioningRuntime.poll();
-#if defined(SMART_LIGHTING_DEMO)
 
-    /*
-     * ========================================================
-     * COMMUNICATION
-     * ========================================================
-     */
-
-    if (
-        simulateCommunicationLoss
-    ) {
-
-        simulateLostMessages();
-
-    }
-    else {
-
-        processNormalCommunication();
-    }
-
-
-    /*
-     * ========================================================
-     * TIMEOUT / RETRY
-     * ========================================================
-     */
-
-    updateMessageTimeouts(
-
+    processMessages(
+        communication,
         messageTracker,
-
-        communication
+        messageDeduplicator,
+        lampRegistry,
+        groupRegistry,
+        sceneRegistry,
+        false,
+        &eventBus
     );
-
-
-    /*
-     * ========================================================
-     * FIN TEST 2
-     * ========================================================
-     */
-
-    PendingMessage* timeoutMessage =
-        findPendingMessage(
-
-            messageTracker,
-
-            timeoutMessageId
-        );
-
-
-    if (
-
-        timeoutMessage != nullptr &&
-
-        timeoutMessage->completed &&
-
-        simulateCommunicationLoss
-
-    ) {
-
-        Serial.println();
-
-        Serial.println(
-            "================================"
-        );
-
-        Serial.println(
-            " TEST 2 TERMINE"
-        );
-
-        Serial.println(
-            "================================"
-        );
-
-
-        printPendingMessage(
-            *timeoutMessage
-        );
-
-
-        simulateCommunicationLoss =
-            false;
-
-
-        delay(
-            1000
-        );
-
-
-        /*
-         * ====================================================
-         * TEST 3
-         * ====================================================
-         */
-
-        Serial.println();
-
-        Serial.println(
-            "================================"
-        );
-
-        Serial.println(
-            " TEST 3 : ACK PERDU + DOUBLON"
-        );
-
-        Serial.println(
-            "================================"
-        );
-
-
-        duplicateMessageId =
-            sendCommand(
-
-                1,
-
-                ActionType::SET_LAMP_POWER,
-
-                1
-            );
-
-
-        processMessages(
-
-            communication,
-
-            messageTracker,
-
-            messageDeduplicator,
-
-            lampRegistry,
-
-            groupRegistry,
-
-            sceneRegistry,
-
-            true,
-
-            &eventBus
-        );
-
-
-        Serial.println();
-
-        Serial.println(
-            "ACK perdu. Attente du timeout..."
-        );
-    }
-
-
-    /*
-     * ========================================================
-     * TEST 3 RESULT
-     * ========================================================
-     */
-
-    PendingMessage* duplicateMessage =
-        findPendingMessage(
-
-            messageTracker,
-
-            duplicateMessageId
-        );
-
-
-    if (
-
-        duplicateMessage != nullptr &&
-
-        !duplicateMessage->completed &&
-
-        duplicateMessage->retryCount > 0
-
-    ) {
-
-        processNormalCommunication();
-
-
-        if (
-            duplicateMessage->completed
-        ) {
-
-            Serial.println();
-
-            Serial.println(
-                "================================"
-            );
-
-            Serial.println(
-                " RESULTAT TEST 3"
-            );
-
-            Serial.println(
-                "================================"
-            );
-
-
-            printPendingMessage(
-                *duplicateMessage
-            );
-
-
-            printMessageDeduplicator(
-                messageDeduplicator
-            );
-
-
-            Serial.println();
-
-            Serial.println(
-                "===== ETAT FINAL LAMPES ====="
-            );
-
-
-            printLampRegistry(
-                lampRegistry
-            );
-
-
-            duplicateMessageId =
-                0;
-        }
-    }
-
-
-#else
-    processNormalCommunication();
 
     updateMessageTimeouts(
         messageTracker,
         communication
     );
-#endif
 
     automationContext.timestamp = millis();
 
@@ -846,6 +255,14 @@ void loop() {
         lampRegistry,
         &eventBus
     );
+
+#if defined(DEVICE_ROLE_CORE)
+    Device* core = findDeviceById(coreDeviceRegistry, CORE_LOGICAL_ID);
+    if (core != nullptr) {
+        updateDeviceSeen(*core, &eventBus);
+    }
+    updateDeviceStatus(coreDeviceRegistry, &eventBus);
+#endif
 
     processEvents(
         eventBus,

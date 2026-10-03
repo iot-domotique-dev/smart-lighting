@@ -5,7 +5,9 @@ La préparation du provisioning V4 MAIN ↔ LAMP est décrite dans
 
 Système d'éclairage intelligent modulaire basé sur ESP32, conçu pour évoluer progressivement vers une architecture domotique distribuée utilisant Zigbee.
 
-Le projet est développé avec **PlatformIO / VS Code** et utilise actuellement **Wokwi** pour les simulations.
+La liaison Zigbee V5 entre `MAIN_LIGHTING` et `LAMP_C6` est validée sur le matériel. La V6 ajoute le registre générique CORE; la V7 prépare son interface pour l'application mobile sans remplacer le chemin de commandes V5.
+
+Le projet est développé avec **PlatformIO / VS Code**. Les tests locaux utilisent `SimulationTransport` et Unity.
 
 Voir aussi l'[audit complet du projet](AUDIT_PROJET.md).
 
@@ -14,23 +16,22 @@ Voir aussi l'[audit complet du projet](AUDIT_PROJET.md).
 ```text
                          ┌───────────────────┐
                          │       CORE        │
-                         │ Coordination /    │
-                         │ Gateway / Logic   │
+                         │  DeviceRegistry   │
                          └─────────┬─────────┘
-                                   │
-                              Zigbee
                                    │
              ┌─────────────────────┼─────────────────────┐
              │                     │                     │
              ▼                     ▼                     ▼
-      ┌─────────────┐       ┌─────────────┐       ┌─────────────┐
-      │ MAIN LIGHT  │       │ MAIN SECURITY│      │ MAIN VIDEO  │
-      └──────┬──────┘       └─────────────┘       └─────────────┘
+      MAIN_LIGHTING         MAIN_SECURITY           MAIN_VIDEO
+             │              (representable)         (representable)
+           Zigbee
              │
        ┌─────┼─────┐
        ▼     ▼     ▼
-    LAMP01 LAMP02 LAMP03
+    LAMP_C6 LAMP_C6 ...
 ```
+
+Le registre générique représente les modules et leur hiérarchie. Le lien Zigbee V5 déjà validé reste `MAIN_LIGHTING` ↔ `LAMP_C6`; le lien réseau CORE ↔ MAIN et les fonctions SECURITY/VIDEO ne font pas partie de la V6.
 
 ### Rôles
 
@@ -38,6 +39,7 @@ Voir aussi l'[audit complet du projet](AUDIT_PROJET.md).
 - **MAIN** : contrôleur principal d'un sous-système (`MAIN_LIGHTING`, `MAIN_SECURITY`, etc.).
 - **LAMP** : équipement physique d'éclairage.
 - **RELAY** : rôle prévu pour des fonctions intermédiaires selon l'évolution du réseau.
+- **SENSOR** et **CAMERA** : rôles réservés pour les extensions futures.
 
 ## Architecture logicielle
 
@@ -79,9 +81,21 @@ Gestion de :
 - rôle ;
 - état `ONLINE` / `OFFLINE` ;
 - dernière activité ;
+- parent ;
+- capacités descriptives ;
 - alimentation ;
 - luminosité ;
 - mode automatique.
+
+### DeviceRegistry V6
+
+`DeviceRegistry` stocke jusqu'à 32 appareils de rôles différents. Il permet l'enregistrement, le retrait, la recherche par ID ou par rôle, l'énumération et la mise à jour d'un appareil. `parentId` décrit la relation CORE → MAIN → device.
+
+Les capacités sont un masque de bits descriptif. Les valeurs actuelles couvrent `POWER`, `BRIGHTNESS`, `AUTOMATIC`, `LIGHTING`, `GROUPS`, `SCENES` et `AUTOMATION`. Des indicateurs `ALARM`, `PRESENCE`, `DOOR_SENSOR` et `SECURITY_MODE` peuvent représenter un futur module SECURITY; aucun comportement SECURITY ou VIDEO n'est implémenté.
+
+`LampRegistry` reste le registre spécialisé utilisé par l'éclairage V5 pour l'état `LampState`, l'identité de pairing et les commandes. `DeviceManager` sait aussi surveiller les statuts du registre générique; les événements existants `LAMP_ONLINE` et `LAMP_OFFLINE` sont conservés pour les lampes.
+
+Pour une future API du CORE, `getDevices()` correspond à `getAllDevices()`, et `getDeviceState(id)` peut lire la fiche avec `findDeviceById()`. `sendCommand(command)` reste à relier au service de commandes V5; aucune API HTTP/mobile n'est incluse en V6.
 
 Commandes principales :
 
@@ -259,211 +273,54 @@ name()
 
 ### Simulation
 
-`SimulationTransport` est actuellement utilisé pour les tests locaux avec Wokwi.
+`SimulationTransport` est utilisé pour les tests natifs; le profil Wokwi a été retiré avant la V7.
 
 ### Zigbee
 
-`ZigbeeTransport` est la couche prévue pour l'intégration du réseau Zigbee réel.
+`ZigbeeTransport` implémente le réseau Zigbee réel V5 entre `MAIN_LIGHTING` et `LAMP_C6`. `SimulationTransport` reste disponible pour les tests natifs.
 
 ## État du projet
 
-### V3.9 — Transport Abstraction
+### V5 - Zigbee réel
 
-Fonctionnalités validées :
+- [x] Liaison Zigbee `MAIN_LIGHTING` <-> `LAMP_C6` validée sur le matériel par l'utilisateur.
+- [x] Commande `power <id> on|off` et sortie GPIO18 de `LAMP_C6`.
+- [x] Chemin V5 de messages, pairing, ACK, retry et déduplication conservé.
 
-- [x] gestion des appareils
-- [x] gestion des lampes
-- [x] groupes
-- [x] scènes
-- [x] automatisations
-- [x] Event Bus
-- [x] messages
-- [x] ACK
-- [x] timeout
-- [x] retransmissions
-- [x] déduplication
-- [x] message tracker
-- [x] message router
-- [x] abstraction du transport
-- [x] simulation du transport
+### V6 - Registre générique
 
-Scénarios de démonstration Wokwi historiques (distincts de la suite native) :
+- [x] Registre CORE/MAIN/LAMP/RELAY/SENSOR/CAMERA avec capacités, parent, recherche, mise à jour et statut.
+- [x] 36 tests natifs et builds Arduino réussis.
+- [ ] Build C6 non confirmé: le compilateur RISC-V s'arrête dans le test CMake avant la compilation du code du projet.
 
-1. transmission normale avec ACK ;
-2. perte de message et retransmissions ;
-3. perte d'ACK et déduplication.
+### V7 - Services du CORE
 
-### V3.9 stabilisée — simulation
+En cours: définir l'interface commune qui permettra à l'application mobile de consulter les modules et leur état, puis de leur envoyer des commandes. Le CORE initialise son registre, ingère les annonces de modules sans doublons et calcule leurs IDs stables à partir du parent et de l'ID local. Voir le [contrat de l'API CORE V7](V7_CORE_API.md). L'accès distant est prévu par VPN privé; le transport CORE <-> MAIN et la coexistence Wi-Fi/Zigbee restent à valider.
 
-- Les six environnements ESP32 (`core`, `main`, `lamp`, `relay`, `lamp_a`, `lamp_b`) compilent.
-- La suite PlatformIO native comprend neuf tests reproductibles ; les neuf passent.
-- `lamp_a` et `lamp_b` restent des rôles `DEVICE_ROLE_LAMP` et utilisent des identifiants locaux distincts (1 et 2).
-- `lamp` conserve les démonstrations Wokwi ; les autres profils démarrent le service applicatif sans injecter d'événements de démonstration.
-- Aucun pilote de capteur ne publie encore les événements de luminosité, présence ou temps ; les automatisations ne sont donc pas validées en service autonome.
-- Le transport actif reste `SimulationTransport`. La compilation ne valide ni le matériel ESP32-C6, ni Zigbee, ni les sorties électriques.
+### Simulation locale
 
-## Simulation Wokwi
+`SimulationTransport` reste disponible pour les tests natifs. Les profils et fichiers Wokwi ont été retirés: ils ne représentaient qu'une carte et rejouaient des scénarios de démonstration inutiles.
 
-La simulation actuelle utilise un seul ESP32 et teste la logique logicielle avant le passage au matériel réel.
-
-```text
-PlatformIO
-    │
-    ▼
-ESP32 Dev Module
-    │
-    ▼
-Wokwi
-```
-
-Le transport utilisé est :
-
-```text
-SimulationTransport
-```
-
-Il ne s'agit pas encore d'un réseau Zigbee réel.
-
-## Environnements PlatformIO
-
-Environnements actuellement définis :
+### Environnements PlatformIO
 
 ```text
 core
 main
-lamp
 relay
-lamp_a
-lamp_b
+main_light_c6
+lamp_c6
+native
 ```
 
-Les rôles sont sélectionnés par des flags de compilation :
+`lamp_c6` est l'unique firmware de lampe maintenu et correspond au module V5 validé sur GPIO18. `lamp_a` et `lamp_b` étaient des variantes d'identité de la démonstration. `SENSOR` et `CAMERA` restent des rôles du registre générique sans profil firmware dédié.
 
-```text
-DEVICE_ROLE_CORE
-DEVICE_ROLE_MAIN
-DEVICE_ROLE_LAMP
-DEVICE_ROLE_RELAY
-```
+### Étapes V7
 
-Les identités des deux profils de lampe sont indépendantes du rôle : `DEVICE_LAMP_A` fixe l'identifiant local 1 et `DEVICE_LAMP_B` l'identifiant 2.
-
-## Matériel cible
-
-La prochaine étape matérielle utilise des microcontrôleurs **ESP32-C6** compatibles avec la connectivité nécessaire au futur réseau Zigbee.
-
-Architecture de test prévue :
-
-```text
-             Zigbee
-        ┌───────────────┐
-        │               │
-        ▼               ▼
-
-     CORE C6         LAMP01 C6
-                         │
-                         │
-                      Zigbee
-                         │
-                         ▼
-                     LAMP02 C6
-```
-
-Le matériel définitif des lampes, de l'alimentation et des cartes électroniques sera déterminé après validation du prototype.
-
-## Principes de conception
-
-### Modularité
-
-Chaque fonction importante doit être isolée dans un module indépendant.
-
-### Séparation des responsabilités
-
-La logique applicative ne doit pas dépendre directement du matériel de communication.
-
-### Évolutivité
-
-L'architecture doit permettre d'ajouter de nouveaux sous-systèmes sans réécrire le système existant.
-
-### Testabilité
-
-Chaque couche doit pouvoir être testée indépendamment.
-
-### Communication abstraite
-
-Le protocole réseau doit rester interchangeable autant que possible.
-
-### Développement progressif
-
-Chaque couche est validée avant d'ajouter la suivante.
-
-## Roadmap
-
-### V1 — Gestion des appareils
-
-- [x] rôles des appareils
-- [x] gestion des lampes
-- [x] registre des appareils
-- [x] détection ONLINE/OFFLINE
-
-### V2 — Logique domotique
-
-- [x] groupes
-- [x] scènes
-- [x] actions
-- [x] automatisations
-- [x] Event Bus
-
-### V3 — Communication logicielle
-
-- [x] messages
-- [x] ACK
-- [x] timeout
-- [x] retransmissions
-- [x] déduplication
-- [x] message tracker
-- [x] message router
-- [x] transport abstraction
-
-### V4 — Zigbee
-
-- [ ] choix définitif du matériel
-- [ ] premier ESP32-C6 réel
-- [ ] initialisation Zigbee
-- [ ] création du réseau
-- [ ] CORE Zigbee
-- [ ] premier module LAMP Zigbee
-- [ ] communication CORE ↔ LAMP
-- [ ] découverte des appareils
-- [ ] adressage
-- [ ] commandes réelles
-- [ ] remontée des états
-
-### V5 — Prototype réel
-
-- [ ] plusieurs lampes physiques
-- [ ] capteur de luminosité
-- [ ] détection de présence
-- [ ] synchronisation des lampes
-- [ ] alimentation réelle
-- [ ] boîtier
-- [ ] tests de portée
-- [ ] tests de stabilité
-- [ ] tests de sécurité
-
-### Évolutions futures
-
-```text
-SMART LIGHTING
-      │
-      ├── LIGHTING
-      ├── SECURITY
-      ├── VIDEO
-      ├── ACCESSIBILITY
-      └── OTHER MODULES
-```
-
-Chaque sous-système pourra rester autonome tout en pouvant communiquer avec le CORE.
+- [ ] Interface d'inventaire consommable par l'application mobile.
+- [ ] Lecture des modules et de leur état par une API commune.
+- [ ] Routage générique des commandes vers les MAIN.
+- [ ] Choix du transport CORE <-> MAIN et validation Wi-Fi/Zigbee sur le matériel.
+- [ ] Accès distant par VPN privé vers le réseau de la maison.
 
 ## Structure du projet
 
@@ -480,6 +337,7 @@ smart-lighting/
 │   ├── command_handler.h
 │   ├── communication.h
 │   ├── communication_transport.h
+│   ├── core_module_service.h
 │   ├── device.h
 │   ├── device_manager.h
 │   ├── device_registry.h
@@ -506,7 +364,6 @@ smart-lighting/
 │   └── ...
 │
 ├── platformio.ini
-├── wokwi.toml
 └── README.md
 ```
 
@@ -528,7 +385,7 @@ pio run
 Compiler un environnement spécifique :
 
 ```bash
-pio run -e lamp
+pio run -e lamp_c6
 ```
 
 Compiler le CORE :
@@ -547,30 +404,31 @@ pio run -e main
 
 ```text
 Project: Smart Lighting
-Current version: V3.9 stabilisée (simulation)
-Status: Builds ESP32 validés, 9 tests natifs validés
-Current transport: Simulation
-Target transport: Zigbee
+Current version: V7 - services CORE pour l'application mobile (en cours)
+V5: liaison Zigbee MAIN_LIGHTING <-> LAMP_C6 validée sur le matériel
+V6: registre générique implémenté; build C6 non vérifié
+Default firmware: lamp_c6
 Target hardware: ESP32-C6
 ```
 
-Vérifications locales :
+Vérifications réussies pendant la V6:
 
 ```bash
-pio run -e core -e main -e lamp -e relay -e lamp_a -e lamp_b
+pio run -e core -e main -e relay
 pio test -e native
 ```
 
-L'environnement de test `native` nécessite un compilateur C/C++ compatible GCC disponible sur le poste. Le profil Wokwi `lamp` conserve les scénarios de démonstration.
+Les builds Arduino et 36 tests natifs ont réussi. Les builds C6 ont été tentés, mais le compilateur RISC-V s'arrête dans son test CMake avec une erreur Windows d'accès au chemin, avant la compilation des sources du projet. Le profil `native` requiert un compilateur C/C++ compatible GCC.
 
 ## Principe général
 
 ```text
 Construire d'abord une architecture logicielle
-stable et indépendante du matériel,
+stable et indépendante des transports,
 
-puis remplacer progressivement la simulation
-par la communication Zigbee réelle.
+puis relier l'application mobile au CORE,
+et le CORE aux MAIN sans remplacer les liens
+de terrain déjà validés.
 ```
 
-L'objectif est d'éviter de reconstruire toute l'architecture lorsque le projet passe de la simulation au matériel physique.
+L'objectif est de garder un contrat commun pour l'éclairage, la sécurité, la vidéosurveillance et les futurs modules.

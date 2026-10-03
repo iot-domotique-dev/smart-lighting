@@ -5,7 +5,9 @@ enum class DeviceRole {
     CORE,
     MAIN,
     LAMP,
-    RELAY
+    RELAY,
+    SENSOR,
+    CAMERA
 
 };
 

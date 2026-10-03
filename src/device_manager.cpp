@@ -27,6 +27,38 @@ static void publishDeviceStatusEvent(
     publishEvent(*eventBus, event);
 }
 
+static EventType statusEventType(
+    const Device& device,
+    bool online
+) {
+    if (device.role == DeviceRole::LAMP) {
+        return online ? EventType::LAMP_ONLINE : EventType::LAMP_OFFLINE;
+    }
+    return online ? EventType::DEVICE_ONLINE : EventType::DEVICE_OFFLINE;
+}
+
+static void expireDeviceIfNeeded(
+    Device& device,
+    uint32_t now,
+    EventBus* eventBus
+) {
+    if (device.status != DeviceStatus::ONLINE ||
+        now - device.lastSeen <= DEVICE_TIMEOUT) {
+        return;
+    }
+
+    device.status = DeviceStatus::OFFLINE;
+    publishDeviceStatusEvent(
+        eventBus,
+        statusEventType(device, false),
+        device,
+        now
+    );
+
+    Serial.print("Device OFFLINE : ");
+    Serial.println(device.name);
+}
+
 void updateDeviceSeen(
     Device& device,
     EventBus* eventBus
@@ -42,7 +74,7 @@ void updateDeviceSeen(
     if (wasOffline) {
         publishDeviceStatusEvent(
             eventBus,
-            EventType::LAMP_ONLINE,
+            statusEventType(device, true),
             device,
             now
         );
@@ -55,48 +87,19 @@ void updateDeviceStatus(
     EventBus* eventBus
 ) {
 
-    uint32_t now = millis();
+    const uint32_t now = millis();
+    for (uint8_t i = 0; i < registry.count; ++i) {
+        expireDeviceIfNeeded(registry.lamps[i].device, now, eventBus);
+    }
+}
 
 
-    for (
-        uint8_t i = 0;
-        i < registry.count;
-        i++
-    ) {
-
-        Device& device =
-            registry.lamps[i].device;
-
-
-        if (
-            device.status ==
-            DeviceStatus::ONLINE
-        ) {
-
-            if (
-                now - device.lastSeen >
-                DEVICE_TIMEOUT
-            ) {
-
-                device.status =
-                    DeviceStatus::OFFLINE;
-
-                publishDeviceStatusEvent(
-                    eventBus,
-                    EventType::LAMP_OFFLINE,
-                    device,
-                    now
-                );
-
-
-                Serial.print(
-                    "Device OFFLINE : "
-                );
-
-                Serial.println(
-                    device.name
-                );
-            }
-        }
+void updateDeviceStatus(
+    DeviceRegistry& registry,
+    EventBus* eventBus
+) {
+    const uint32_t now = millis();
+    for (uint8_t i = 0; i < registry.count; ++i) {
+        expireDeviceIfNeeded(registry.devices[i], now, eventBus);
     }
 }

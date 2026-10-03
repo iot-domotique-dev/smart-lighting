@@ -58,6 +58,16 @@ void processEvents(
 
                 break;
 
+            case EventType::DEVICE_ONLINE:
+
+            case EventType::DEVICE_OFFLINE:
+
+                Serial.println(
+                    "Evenement etat device traite"
+                );
+
+                break;
+
             case EventType::COMMAND_RECEIVED:
 
                 Serial.println(

@@ -122,6 +122,18 @@ void printEvent(
                 "DEVICE_STATE_CHANGED"
             );
             break;
+
+        case EventType::DEVICE_ONLINE:
+            Serial.println(
+                "DEVICE_ONLINE"
+            );
+            break;
+
+        case EventType::DEVICE_OFFLINE:
+            Serial.println(
+                "DEVICE_OFFLINE"
+            );
+            break;
     }
 
     Serial.print("Source ID : ");

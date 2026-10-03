@@ -1,7 +1,0 @@
-[wokwi]
-
-version = 1
-
-firmware = ".pio/build/lamp/firmware.bin"
-
-elf = ".pio/build/lamp/firmware.elf"
