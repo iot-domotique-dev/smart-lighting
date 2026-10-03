@@ -4,6 +4,7 @@
 #include <Arduino.h>
 
 #include "action.h"
+#include "device_manager.h"
 #include "device_hardware_id.h"
 #include "message_id_generator.h"
 #include "message_router.h"
@@ -99,8 +100,22 @@ bool V5ProvisioningRuntime::begin(
 }
 
 void V5ProvisioningRuntime::poll() {
-    if (role != DeviceRole::LAMP || lampPairing == nullptr ||
-        !communicationReady(communication)) {
+    if (role != DeviceRole::LAMP || lampPairing == nullptr) {
+        return;
+    }
+
+    const ProvisioningPacket announcement = lampPairing->announce();
+    if (announcement.pairingState == PairingState::PAIRED &&
+        announcement.deviceId != 0) {
+        // The local LAMP registry entry is not refreshed by receiving its own traffic.
+        Lamp* localLamp = findLampByHardwareId(lamps, announcement.hardwareId);
+        if (localLamp != nullptr &&
+            localLamp->identity.parentMainId == announcement.parentMainId) {
+            updateDeviceSeen(localLamp->device);
+        }
+    }
+
+    if (!communicationReady(communication)) {
         return;
     }
 
@@ -108,7 +123,6 @@ void V5ProvisioningRuntime::poll() {
     if (static_cast<int32_t>(now - nextAnnounceAt) < 0) {
         return;
     }
-    const ProvisioningPacket announcement = lampPairing->announce();
     const uint32_t sourceId = announcement.deviceId;
     if (sendPacket(announcement, sourceId, 0)) {
         nextAnnounceAt = now + 5000;

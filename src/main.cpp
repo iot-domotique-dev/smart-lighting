@@ -89,35 +89,22 @@ bool simulateCommunicationLoss = false;
  * ============================================================
  */
 
-static uint32_t sendCommand(
+[[maybe_unused]] static uint32_t sendCommand(
     uint32_t destinationId,
     ActionType actionType,
     int32_t value
 ) {
-    Message command = {
-
-        generateMessageId(),
-
-        communication.localDeviceId,
-
-        destinationId,
-
-        MessageType::COMMAND,
-
-        millis(),
-
-        static_cast<int32_t>(
-            actionType
-        ),
-
-        value,
-
-        0,
-
-        MessageStatus::PENDING,
-
-        ExecutionStatus::NOT_EXECUTED
-    };
+    Message command{};
+    command.id = generateMessageId();
+    command.sourceId = communication.localDeviceId;
+    command.destinationId = destinationId;
+    command.type = MessageType::COMMAND;
+    command.timestamp = millis();
+    command.commandType = static_cast<int32_t>(actionType);
+    command.value = value;
+    command.value2 = 0;
+    command.status = MessageStatus::PENDING;
+    command.executionStatus = ExecutionStatus::NOT_EXECUTED;
 
 
     if (
@@ -165,7 +152,7 @@ static uint32_t sendCommand(
  * ============================================================
  */
 
-static void simulateLostMessages() {
+[[maybe_unused]] static void simulateLostMessages() {
 
     Message lostMessage;
 

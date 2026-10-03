@@ -103,8 +103,8 @@ ProvisioningPacket ProvisioningLamp::announce() const {
     packet.role = DeviceRole::LAMP;
     packet.pairingState = pairingState;
     packet.capabilities = capabilities;
+    // Keep periodic broadcast announcements short enough for APS transmission.
     copyText(packet.hardwareId, sizeof(packet.hardwareId), hardwareId);
-    copyText(packet.firmwareVersion, sizeof(packet.firmwareVersion), firmwareVersion);
     if (pairingState == PairingState::PAIRED) {
         packet.deviceId = configuration.deviceId;
         packet.parentMainId = configuration.parentMainId;

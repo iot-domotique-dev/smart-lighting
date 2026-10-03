@@ -50,30 +50,17 @@ static void sendAck(
     ExecutionStatus executionStatus,
     bool dropAck
 ) {
-    Message ack = {
-        generateMessageId(),
-
-        command.destinationId,
-        command.sourceId,
-
-        MessageType::ACK,
-
-        millis(),
-
-        command.commandType,
-
-        static_cast<int32_t>(
-            executionStatus
-        ),
-
-        static_cast<int32_t>(
-            command.id
-        ),
-
-        MessageStatus::PENDING,
-
-        executionStatus
-    };
+    Message ack{};
+    ack.id = generateMessageId();
+    ack.sourceId = command.destinationId;
+    ack.destinationId = command.sourceId;
+    ack.type = MessageType::ACK;
+    ack.timestamp = millis();
+    ack.commandType = command.commandType;
+    ack.value = static_cast<int32_t>(executionStatus);
+    ack.value2 = static_cast<int32_t>(command.id);
+    ack.status = MessageStatus::PENDING;
+    ack.executionStatus = executionStatus;
 
 
     if (

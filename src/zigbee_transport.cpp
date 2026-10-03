@@ -306,6 +306,15 @@ bool ZigbeeTransport::begin() {
         return false;
     }
 
+    const esp_err_t zigbeeNvsResult =
+        nvs_flash_init_partition(ZIGBEE_STORAGE_PARTITION);
+    if (zigbeeNvsResult != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "Zigbee storage partition init failed (%s); no automatic erase performed",
+                 esp_err_to_name(zigbeeNvsResult));
+        return false;
+    }
+
     incomingMessages = xQueueCreate(RX_QUEUE_LENGTH, sizeof(Message));
     if (incomingMessages == nullptr) {
         ESP_LOGE(TAG, "Unable to allocate receive queue");
@@ -341,7 +350,8 @@ bool ZigbeeTransport::send(const Message& message) {
     ezb_apsde_data_req_t request = {};
     const bool broadcast = isBroadcast(message);
     if (broadcast) {
-        request.dst_address = EZB_ADDRESS_SHORT(BROADCAST_RX_ON_WHEN_IDLE);
+        ezb_address_set_short(&request.dst_address,
+                              BROADCAST_RX_ON_WHEN_IDLE);
     } else {
         uint16_t destination = 0;
         if (!findRoute(message, destination)) {
@@ -349,7 +359,7 @@ bool ZigbeeTransport::send(const Message& message) {
                      static_cast<unsigned long>(message.destinationId));
             return false;
         }
-        request.dst_address = EZB_ADDRESS_SHORT(destination);
+        ezb_address_set_short(&request.dst_address, destination);
     }
     request.src_endpoint = APP_ENDPOINT;
     request.dst_endpoint = APP_ENDPOINT;

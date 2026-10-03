@@ -24,7 +24,7 @@ La dépendance est fixée à `espressif/esp-zigbee-lib ~2.0.4`. Le profil Platfo
 
 ## Carte PlatformIO
 
-Le dépôt ne donne pas le modèle physique exact. `esp32-c6-devkitc-1` est l’identifiant PlatformIO officiel utilisé comme profil de référence C6; il ne certifie pas que la carte physique est une DevKitC-1. Avant le flash, confirmer le modèle et adapter le profil si nécessaire. Aucun identifiant de carte personnalisé n’a été inventé. Le port série et le GPIO de test restent à confirmer sur la carte réelle.
+Les deux cartes de test sont des Waveshare ESP32-C6-DEV-KIT-N8 avec module ESP32-C6-WROOM-1-N8 et 8 Mo de flash. PlatformIO n’expose pas de board ID Waveshare dédié pour ce modèle; le projet utilise l’identifiant officiel `esp32-c6-devkitc-1`, dont le profil C6 est à 160 MHz avec 8 Mo de flash. Waveshare indique que le brochage est compatible avec l’ESP32-C6-DevKitC-1 [fiche Waveshare](https://www.waveshare.com/esp32-c6-dev-kit-n8.htm), [profil PlatformIO](https://docs.platformio.org/en/latest/boards/espressif32/esp32-c6-devkitc-1.html). Les ports série seront identifiés au branchement; le GPIO de la LED externe reste à sélectionner à partir du pinout de la carte.
 
 ## Rôles Zigbee
 
@@ -54,7 +54,7 @@ Le Device ID est logique et attribué par MAIN. Le hardwareId n’est pas un com
 
 `NvsProvisioningStore` implémente l’abstraction V4 `ProvisioningStore` avec des clés NVS versionnées. Il persiste Device ID, hardwareId, nom, parentMainId et pairingState. Au démarrage, `ProvisioningLamp` relit la fiche; le LAMP annonce alors son Device ID existant et ne demande pas une nouvelle attribution.
 
-Le dataset Zigbee utilise la partition `zb_storage`. Les données de pairing utilisent la partition NVS standard. Une erreur NVS est affichée; le firmware ne fait pas d’effacement automatique qui risquerait de supprimer un pairing existant.
+Le dataset Zigbee utilise la partition NVS `zb_storage`, initialisée par `nvs_flash_init_partition()` avant la pile Zigbee. Les données de pairing de l’application utilisent la partition NVS standard. Une erreur NVS est affichée; le firmware ne fait pas d’effacement automatique qui risquerait de supprimer un pairing existant.
 
 MAIN reconstruit le registry à partir des annonces des lampes paired qui reviennent sur le réseau. Le dépôt V4 n’avait pas de store de registry MAIN; sa persistance NVS séparée n’est pas ajoutée dans ce jalon.
 
@@ -112,14 +112,14 @@ Selon le rôle et l’état persistant, les lignes principales sont:
 
 **Implémenté dans le dépôt:** intégration réelle ESP-Zigbee SDK/APS dans la cible C6; formation/steering; codecs de `Message`; callback de réception et confirmations APS; discovery et pairing branchés aux classes V4; NVS pour l’identité pairing de LAMP; console de commissioning explicite; commande `SET_LAMP_POWER` sur le chemin ACK/retry existant; GPIO configurable et encapsulée.
 
-**Vérifié dans cet environnement:** `pio test -e native` passe avec 28 tests, dont les 23 tests V3/V4 déjà présents et les 5 tests du codec. Aucun test radio n’a été simulé comme test matériel. Le build C6 n’a pas abouti ici: PlatformIO doit télécharger le profil `espressif32@7.0.0`, absent de son cache projet, et la résolution réseau n’est pas disponible dans cet environnement. Le test radio nécessite deux ESP32-C6 physiques.
+**Vérifié dans cet environnement:** `pio test -e native` passe avec 28 tests, dont les 23 tests V3/V4 déjà présents et les 5 tests du codec. Les builds `pio run -e main_light_c6` et `pio run -e lamp_c6` passent; les deux tables générées déclarent `zb_storage` en NVS et placent l’application à `0x20000`. Aucun test radio n’a été simulé comme test matériel. Le test radio nécessite deux ESP32-C6 physiques.
 
-**Pas encore vérifié:** compilation C6 avec le Component Manager; formation/join radio; réception APS; pairing et reconnexion après coupure; ACK/retry sur radio; comportement réel du port console; GPIO et LED; PWM. Le modèle physique exact et son GPIO restent à renseigner. Il ne faut donc pas conclure que « Zigbee fonctionne » avant ces essais.
+**Pas encore vérifié:** formation/join radio; réception APS; pairing et reconnexion après coupure; ACK/retry sur radio; comportement réel du port console; GPIO et LED; PWM. La communication radio et le GPIO de test restent à valider sur les deux cartes reçues. Il ne faut donc pas conclure que « Zigbee fonctionne » avant ces essais.
 
 ## Prochain test matériel
 
-1. Identifier le modèle exact des deux cartes et leurs ports.
-2. Compiler/flash MAIN puis LAMP avec les environnements C6.
+1. Brancher les deux Waveshare ESP32-C6-DEV-KIT-N8 et relever leurs ports série.
+2. Pour la première mise en service, effacer la flash de chaque carte puis flasher MAIN et LAMP avec leurs environnements C6 respectifs.
 3. Capturer les logs des deux côtés et vérifier `network formed`, `network joined` et `device connected`.
 4. Sur MAIN, lancer explicitement `pair <hardwareId> LAMP01`; vérifier `PAIR_CONFIRM` et Device ID.
 5. Redémarrer LAMP et vérifier que le même Device ID est annoncé.
