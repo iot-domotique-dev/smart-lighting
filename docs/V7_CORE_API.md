@@ -38,7 +38,7 @@ Chaque parent fournit un `localId` non nul, stable après redémarrage et unique
 
 Le CORE utilise l'ID logique `1` pour sa racine. Un MAIN s'annonce d'abord avec `parentId = 1`; après son enregistrement, le CORE lui fournit son ID logique calculé. Le MAIN utilise ensuite cet ID comme `parentId` lorsqu'il annonce ses propres modules.
 
-## Opérations de l'application
+## Opérations prévues pour l'application
 
 Le contrat logique V7 expose trois opérations, quel que soit le transport client :
 
@@ -48,7 +48,7 @@ Le contrat logique V7 expose trois opérations, quel que soit le transport clien
 | Lire un module | Descripteur générique et état fourni par son MAIN lorsqu'il est disponible. |
 | Envoyer une commande | Résultat d'acceptation avec `commandId`; le résultat final dépend de l'ACK du MAIN. |
 
-Première commande visée: `power.set` pour les lampes paired de la V5. Toute commande est vérifiée selon les capacités de l'appareil, son état ONLINE et le MAIN parent. Une capacité absente donne une erreur explicite au lieu d'être ignorée.
+La commande `power.set` pour les lampes paired de la V5 reste une étape prévue. Elle n'est pas encore exposée par l'API locale V7.1. Toute commande future devra être vérifiée selon les capacités de l'appareil, son état ONLINE et le MAIN parent.
 
 ## Règles de comportement
 
@@ -74,7 +74,7 @@ L'application utilise le même contrat localement et via VPN. L'authentification
 4. [ ] Relier les annonces MAIN au CORE sur le transport retenu; l'implémentation et les tests natifs existent. Les essais matériels confirment la réception Zigbee par C6-ZIGBEE, mais pas encore le cycle complet d'attribution/retour d'ID via C6-WIFI.
 5. [ ] Lire l'état générique d'un module depuis le MAIN qui le gère.
 6. [ ] Router `power.set` vers le chemin de commande V5 existant.
-7. [ ] Exposer les trois opérations à l'application mobile via l'adaptateur réseau choisi.
+7. [~] Exposer l'inventaire et la santé en lecture seule via l'API HTTP locale V7.1 (`docs/V7_1_CORE_API.md`); commandes et état métier détaillé à venir.
 8. [ ] Valider l'accès distant par VPN privé et conserver la même API.
 
 ## Validation matérielle provisoire

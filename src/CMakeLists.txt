@@ -12,7 +12,7 @@ if(SMART_LIGHTING_BUILD_ZIGBEE)
     list(APPEND SMART_LIGHTING_COMPONENTS espressif__esp-zigbee-lib)
 endif()
 if(SMART_LIGHTING_BUILD_WIFI)
-    list(APPEND SMART_LIGHTING_COMPONENTS esp_wifi esp_event esp_netif)
+    list(APPEND SMART_LIGHTING_COMPONENTS esp_wifi esp_event esp_netif esp_http_server)
 endif()
 
 idf_component_register(

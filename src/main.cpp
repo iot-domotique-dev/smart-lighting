@@ -268,11 +268,7 @@ void setup() {
 void loop() {
 #if defined(SMART_LIGHTING_CORE_WIFI)
     coreWifiRuntime.poll();
-    Device* core = findDeviceById(coreDeviceRegistry, CORE_LOGICAL_ID);
-    if (core != nullptr) {
-        updateDeviceSeen(*core, &eventBus);
-    }
-    updateDeviceStatus(coreDeviceRegistry, &eventBus);
+    coreWifiRuntime.refreshRegistryStatus(eventBus);
     delay(10);
     return;
 #else

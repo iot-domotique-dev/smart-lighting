@@ -1,8 +1,13 @@
 #pragma once
 
+#include "core_http_api.h"
 #include "core_uart_transport.h"
 #include "device_registry.h"
+#include "event_bus.h"
 #include "wifi_transport.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 /* Owns the global V7 inventory and the CORE-WIFI physical services. */
 class CoreWifiRuntime {
@@ -10,6 +15,8 @@ private:
     DeviceRegistry& registry;
     CoreUartTransport uart;
     WiFiTransport wifi;
+    SemaphoreHandle_t registryMutex;
+    CoreHttpApi api;
     bool uartReady;
 
     void handlePacket(const CoreLinkPacket& packet);
@@ -19,6 +26,7 @@ public:
 
     bool begin();
     void poll();
+    void refreshRegistryStatus(EventBus& eventBus);
     WiFiTransport& wifiTransport();
     CoreUartTransport& uartTransport();
 };
