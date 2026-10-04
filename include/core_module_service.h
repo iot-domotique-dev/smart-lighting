@@ -31,6 +31,6 @@ CoreModuleUpdateResult ingestCoreModuleAnnouncement(
     uint32_t receivedAt
 );
 
-#if defined(DEVICE_ROLE_CORE)
+#if defined(SMART_LIGHTING_CORE_WIFI)
 extern DeviceRegistry coreDeviceRegistry;
 #endif

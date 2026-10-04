@@ -8,16 +8,35 @@
 #include "event_bus.h"
 
 namespace {
-ApplicationMessageHandler applicationMessageHandler = nullptr;
-void* applicationMessageContext = nullptr;
+constexpr uint8_t MAX_APPLICATION_MESSAGE_HANDLERS = 4;
+struct ApplicationMessageHandlerSlot {
+    ApplicationMessageHandler handler;
+    void* context;
+};
+ApplicationMessageHandlerSlot applicationMessageHandlers[
+    MAX_APPLICATION_MESSAGE_HANDLERS
+] = {};
 }
 
 void registerApplicationMessageHandler(
     ApplicationMessageHandler handler,
     void* context
 ) {
-    applicationMessageHandler = handler;
-    applicationMessageContext = context;
+    if (handler == nullptr) return;
+
+    for (uint8_t i = 0; i < MAX_APPLICATION_MESSAGE_HANDLERS; ++i) {
+        if (applicationMessageHandlers[i].handler == handler &&
+            applicationMessageHandlers[i].context == context) {
+            return;
+        }
+    }
+    for (uint8_t i = 0; i < MAX_APPLICATION_MESSAGE_HANDLERS; ++i) {
+        if (applicationMessageHandlers[i].handler == nullptr) {
+            applicationMessageHandlers[i] = {handler, context};
+            return;
+        }
+    }
+    Serial.println("[MESSAGE] application handler capacity reached");
 }
 
 
@@ -151,12 +170,17 @@ void processMessages(
             message
         );
 
-        if (applicationMessageHandler != nullptr &&
-            applicationMessageHandler(
-                communication,
-                message,
-                applicationMessageContext
-            )) {
+        bool applicationMessageHandled = false;
+        for (uint8_t i = 0; i < MAX_APPLICATION_MESSAGE_HANDLERS; ++i) {
+            const ApplicationMessageHandlerSlot& slot =
+                applicationMessageHandlers[i];
+            if (slot.handler != nullptr &&
+                slot.handler(communication, message, slot.context)) {
+                applicationMessageHandled = true;
+                break;
+            }
+        }
+        if (applicationMessageHandled) {
             continue;
         }
 

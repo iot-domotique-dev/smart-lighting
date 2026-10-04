@@ -1,4 +1,4 @@
-#if defined(SMART_LIGHTING_ZIGBEE)
+#if defined(SMART_LIGHTING_ZIGBEE) || defined(SMART_LIGHTING_CORE_WIFI)
 extern void setup();
 extern void loop();
 

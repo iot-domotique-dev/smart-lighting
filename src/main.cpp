@@ -18,6 +18,17 @@
 #include "lamp_hardware.h"
 #include "v5_console.h"
 
+#if defined(SMART_LIGHTING_CORE_WIFI)
+#include "core_wifi_runtime.h"
+#include "wifi_transport.h"
+#elif defined(SMART_LIGHTING_CORE_ZIGBEE)
+#include "core_zigbee_runtime.h"
+#endif
+
+#if defined(SMART_LIGHTING_ZIGBEE) && defined(DEVICE_ROLE_MAIN)
+#include "core_main_runtime.h"
+#endif
+
 #if defined(SMART_LIGHTING_ZIGBEE)
 #include "nvs_provisioning_store.h"
 #endif
@@ -45,7 +56,7 @@ const char* roleName(DeviceRole role) {
 
 LampRegistry lampRegistry;
 
-#if defined(DEVICE_ROLE_CORE)
+#if defined(SMART_LIGHTING_CORE_WIFI)
 DeviceRegistry coreDeviceRegistry;
 #endif
 
@@ -77,6 +88,16 @@ V5ProvisioningRuntime v5ProvisioningRuntime(
     lampRegistry,
     messageTracker
 );
+
+#if defined(SMART_LIGHTING_CORE_WIFI)
+CoreWifiRuntime coreWifiRuntime(coreDeviceRegistry);
+#elif defined(SMART_LIGHTING_CORE_ZIGBEE)
+CoreZigbeeRuntime coreZigbeeRuntime(communication);
+#endif
+
+#if defined(SMART_LIGHTING_ZIGBEE) && defined(DEVICE_ROLE_MAIN)
+CoreMainRuntime coreMainRuntime(communication);
+#endif
 
 bool commissionLampV5(const char* hardwareId, const char* requestedName) {
     return v5ProvisioningRuntime.commissionLamp(hardwareId, requestedName);
@@ -135,7 +156,7 @@ void setup() {
         lampRegistry
     );
 
-#if defined(DEVICE_ROLE_CORE)
+#if defined(SMART_LIGHTING_CORE_WIFI)
     initDeviceRegistry(coreDeviceRegistry);
     const Device coreDevice = {
         CORE_LOGICAL_ID,
@@ -180,6 +201,7 @@ void setup() {
      * que Communication.
      */
 
+#if !defined(SMART_LIGHTING_CORE_WIFI)
     initCommunication(
         communication,
 #if defined(SMART_LIGHTING_ZIGBEE)
@@ -193,6 +215,7 @@ void setup() {
         0
 #endif
     );
+#endif
 
 
     initMessageTracker(
@@ -205,6 +228,7 @@ void setup() {
     );
 
 #if defined(SMART_LIGHTING_ZIGBEE)
+#if !defined(SMART_LIGHTING_CORE_ZIGBEE)
     static NvsProvisioningStore lampProvisioningStore;
     if (DEVICE_ROLE == DeviceRole::LAMP) {
         (void)v5ProvisioningRuntime.begin(DEVICE_ROLE, &lampProvisioningStore);
@@ -212,12 +236,23 @@ void setup() {
         (void)v5ProvisioningRuntime.begin(DEVICE_ROLE);
     }
     startV5Console();
+#else
+    (void)coreZigbeeRuntime.begin();
+#endif
+
+#if defined(DEVICE_ROLE_MAIN)
+    (void)coreMainRuntime.begin(v5ProvisioningRuntime.mainId());
+#endif
 #endif
 
 
+#if !defined(SMART_LIGHTING_CORE_WIFI)
     printCommunicationStatus(
         communication
     );
+#else
+    (void)coreWifiRuntime.begin();
+#endif
 
 
 
@@ -231,7 +266,27 @@ void setup() {
  */
 
 void loop() {
+#if defined(SMART_LIGHTING_CORE_WIFI)
+    coreWifiRuntime.poll();
+    Device* core = findDeviceById(coreDeviceRegistry, CORE_LOGICAL_ID);
+    if (core != nullptr) {
+        updateDeviceSeen(*core, &eventBus);
+    }
+    updateDeviceStatus(coreDeviceRegistry, &eventBus);
+    delay(10);
+    return;
+#else
+#if !defined(SMART_LIGHTING_CORE_ZIGBEE)
     v5ProvisioningRuntime.poll();
+#endif
+
+#if defined(SMART_LIGHTING_CORE_ZIGBEE)
+    coreZigbeeRuntime.poll();
+#endif
+
+#if defined(SMART_LIGHTING_ZIGBEE) && defined(DEVICE_ROLE_MAIN)
+    coreMainRuntime.poll();
+#endif
 
     processMessages(
         communication,
@@ -256,14 +311,6 @@ void loop() {
         &eventBus
     );
 
-#if defined(DEVICE_ROLE_CORE)
-    Device* core = findDeviceById(coreDeviceRegistry, CORE_LOGICAL_ID);
-    if (core != nullptr) {
-        updateDeviceSeen(*core, &eventBus);
-    }
-    updateDeviceStatus(coreDeviceRegistry, &eventBus);
-#endif
-
     processEvents(
         eventBus,
         automationRegistry,
@@ -274,4 +321,5 @@ void loop() {
     );
 
     delay(100);
+#endif
 }

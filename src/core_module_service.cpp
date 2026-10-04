@@ -61,9 +61,6 @@ CoreModuleUpdateResult ingestCoreModuleAnnouncement(
     if (parent == nullptr) {
         return CoreModuleUpdateResult::PARENT_UNKNOWN;
     }
-    if (!isValidParentRole(announcement.role, parent->role)) {
-        return CoreModuleUpdateResult::INVALID_ANNOUNCEMENT;
-    }
 
     const uint32_t globalId = makeCoreModuleId(announcement.parentId,
                                                announcement.localId);
@@ -88,6 +85,10 @@ CoreModuleUpdateResult ingestCoreModuleAnnouncement(
             return CoreModuleUpdateResult::IDENTITY_CONFLICT;
         }
         return CoreModuleUpdateResult::UPDATED;
+    }
+
+    if (!isValidParentRole(announcement.role, parent->role)) {
+        return CoreModuleUpdateResult::INVALID_ANNOUNCEMENT;
     }
 
     Device discovered = {};

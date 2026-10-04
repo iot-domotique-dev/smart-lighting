@@ -9,7 +9,7 @@ Application mobile
         │ API versionnée
         ▼
 CORE : inventaire + état + commandes
-        │ transport CORE ↔ MAIN à définir
+        │ C6-WIFI -- UART -- C6-ZIGBEE -- Zigbee/PAN
         ▼
 MAIN_LIGHTING / MAIN_SECURITY / MAIN_VIDEO ...
         │
@@ -62,7 +62,7 @@ Première commande visée: `power.set` pour les lampes paired de la V5. Toute co
 
 **Accès distant retenu:** VPN privé vers le réseau domestique. Le CORE expose son API sur le réseau local; depuis l'extérieur, le téléphone rejoint ce même réseau par VPN. Le VPN se termine sur le routeur ou une passerelle du domicile, pas sur le microcontrôleur.
 
-Le transport CORE ↔ MAIN reste à définir. La liaison Zigbee validée `MAIN_LIGHTING` ↔ `LAMP_C6` reste intacte. Wi-Fi IP est une piste pour relier plusieurs domaines, mais il ne faut pas activer le Wi-Fi en continu sur les C6 sans vérifier la coexistence radio: Espressif classe Wi-Fi STA avec Zigbee/802.15.4 routeur comme pris en charge mais instable, et recommande deux SoC pour une passerelle Wi-Fi/Zigbee. Voir la [documentation ESP-IDF sur la coexistence radio C6](https://docs.espressif.com/projects/esp-idf/en/v5.5/esp32c6/api-guides/coexist.html).
+Le CORE ↔ MAIN passe par Zigbee via C6-ZIGBEE; C6-WIFI héberge l'inventaire et accueillera l'API mobile. Le lien V5 `MAIN_LIGHTING` ↔ `LAMP_C6` reste intact. Les rôles Wi-Fi et Zigbee sont séparés sur deux C6; le VPN privé relie le téléphone au réseau domestique sans transporter les messages CORE ↔ MAIN.
 
 L'application utilise le même contrat localement et via VPN. L'authentification de l'API sur le réseau local reste à définir avant d'exposer le serveur; aucun secret ni service cloud n'est inclus dans cette étape.
 
@@ -71,8 +71,15 @@ L'application utilise le même contrat localement et via VPN. L'authentification
 1. [x] Instancier l'inventaire générique sur CORE et ajouter une entrée CORE racine.
 2. [x] Ajouter l'ingestion idempotente d'une annonce MAIN dans le registre CORE.
 3. [x] Calculer des IDs CORE stables à partir du parent et de l'ID local, avec détection de collision.
-4. [ ] Relier les annonces MAIN au CORE sur le transport retenu; l'ingestion n'est pas encore appelée par un transport réseau.
+4. [ ] Relier les annonces MAIN au CORE sur le transport retenu; l'implémentation et les tests natifs existent. Les essais matériels confirment la réception Zigbee par C6-ZIGBEE, mais pas encore le cycle complet d'attribution/retour d'ID via C6-WIFI.
 5. [ ] Lire l'état générique d'un module depuis le MAIN qui le gère.
 6. [ ] Router `power.set` vers le chemin de commande V5 existant.
 7. [ ] Exposer les trois opérations à l'application mobile via l'adaptateur réseau choisi.
 8. [ ] Valider l'accès distant par VPN privé et conserver la même API.
+
+## Validation matérielle provisoire
+
+- C6-WIFI démarre le pilote Wi-Fi et initialise son UART.
+- C6-ZIGBEE reçoit l'ACK UART de C6-WIFI (`UART peer ready`).
+- MAIN_LIGHTING rejoint le PAN; les annonces V7 du MAIN sont visibles côté C6-ZIGBEE.
+- Le journal matériel n'a pas encore confirmé l'ID calculé sur C6-WIFI ni son retour visible sur MAIN (`[V7] MAIN CORE id=...`). Le routage des quatre modules, l'absence de doublon et le rejet d'identités incohérentes restent à vérifier sur le matériel.
