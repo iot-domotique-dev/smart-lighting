@@ -1,39 +1,40 @@
 # V7 — CORE à deux ESP32-C6
 
-Cette étape sépare le CORE logique sur deux cartes. Elle prépare les transports
-et l'attribution d'identité V7 ; elle n'inclut pas le serveur de l'application.
+## Répartition des rôles
 
-```text
-Téléphone / réseau IP
-        │
-   C6-WIFI (CORE = 1, registre, IDs)
-        │ UART point-à-point
-   C6-ZIGBEE (routeur Zigbee, sans registre global)
-        │ un seul PAN Zigbee
-   MAIN_LIGHTING ─── LAMP_C6
-```
+Le CORE est une seule entité logique répartie sur deux cartes :
 
-Le VPN relie le téléphone au réseau domestique. Il ne transporte pas les
-messages CORE ↔ MAIN. Le lien Zigbee V5 MAIN_LIGHTING ↔ LAMP_C6 et ses codecs
-restent inchangés.
+~~~text
+Appareil client ── Wi-Fi/IP ── C6-WIFI
+                                  │ UART local
+                                  ▼
+MAIN_LIGHTING ── Zigbee ── C6-ZIGBEE
+      │
+      └────────── Zigbee V5 ── LAMP_C6
+~~~
 
-## Profils PlatformIO
+- **C6-WIFI** possède le registre global, la racine CORE ID 1, l’attribution des IDs, la station Wi-Fi et l’API HTTP.
+- **C6-ZIGBEE** participe à un seul PAN, relaie les annonces et les réponses d’identité par UART. Il ne possède pas le registre global et ne lance pas HTTP.
+- **MAIN_LIGHTING ↔ LAMP_C6** conserve le chemin fonctionnel V5.
+- Le VPN éventuel reliera un téléphone au réseau du domicile; il ne transporte pas CORE ↔ MAIN.
 
-- `core_wifi_c6` : station Wi-Fi, racine du registre (`CORE_LOGICAL_ID = 1`),
-  attribution des identifiants V7 et liaison UART. Il ne démarre ni Zigbee ni
-  le provisioning V5.
-- `core_zigbee_c6` : transport Zigbee et relais des annonces/attributions sur
-  UART ; aucun registre global. Il rejoint le PAN existant en rôle routeur.
-- `main_light_c6` et `lamp_c6` : profils V5 conservés.
+## Identités et annonces
 
-Le protocole UART utilise des trames v1 avec synchronisation, type, numéro de
-séquence, longueur explicite, payload sérialisé champ par champ et CRC-16
-CCITT-FALSE. Les types comprennent HELLO, MODULE_ANNOUNCEMENT, ID_ASSIGNMENT,
-ACK, STATE et ERROR. Aucune structure C++ n'est copiée directement sur le fil.
+Le contrat V7 est conservé :
 
-## Câblage prototype
+- La racine CORE a l’ID logique 1.
+- Le CORE calcule les IDs depuis {parentId, localId}. Ils sont stables au sein d’un CORE, mais ne sont pas globaux entre foyers.
+- Une annonce répétée met à jour l’entrée existante.
+- Une identité incohérente ou une collision est rejetée.
+- Un MAIN reçoit son ID CORE avant d’annoncer ses propres modules avec cet ID comme parent.
 
-Relier les broches TX et RX en croisé et partager la masse :
+C6-ZIGBEE reçoit l’annonce Zigbee du MAIN et la transmet par UART à C6-WIFI. C6-WIFI valide l’identité, actualise le registre et renvoie l’attribution ou une erreur. C6-ZIGBEE transmet la réponse au MAIN.
+
+## UART entre les C6
+
+Le protocole utilise des trames versionnées avec synchronisation, type, séquence, longueur explicite, payload sérialisé champ par champ et CRC-16 CCITT-FALSE. Il ne transmet aucune structure C++ en mémoire. Les types couvrent notamment HELLO, MODULE_ANNOUNCEMENT, ID_ASSIGNMENT, ACK, STATE et ERROR.
+
+Brochage prototype par défaut, TX/RX croisés et masse commune :
 
 | C6-WIFI | C6-ZIGBEE |
 | --- | --- |
@@ -41,35 +42,19 @@ Relier les broches TX et RX en croisé et partager la masse :
 | GPIO5 RX | GPIO4 TX |
 | GND | GND |
 
-Les valeurs par défaut sont `UART1`, GPIO4/5 et 115200 bauds. Elles sont
-configurables par les drapeaux de compilation PlatformIO :
-`CORE_LINK_UART_PORT`, `CORE_LINK_UART_TX_PIN`, `CORE_LINK_UART_RX_PIN` et
-`CORE_LINK_UART_BAUD`. Adapter le câblage si ces valeurs changent. Ne pas relier
-les sorties d'alimentation 3,3 V des deux cartes entre elles.
+Les paramètres par défaut sont UART1 et 115200 bauds. Les broches, le port et le débit sont configurables via CORE_LINK_UART_PORT, CORE_LINK_UART_TX_PIN, CORE_LINK_UART_RX_PIN et CORE_LINK_UART_BAUD dans PlatformIO. Ne pas relier les alimentations 3,3 V des cartes entre elles.
 
-## Identité et flux
+## Profils
 
-1. MAIN_LIGHTING diffuse son annonce locale sur Zigbee avec `parentId = 1`.
-2. C6-ZIGBEE traduit l'annonce en trame UART.
-3. C6-WIFI valide l'identité et met à jour le registre racine ; une répétition
-   met à jour la même entrée.
-4. C6-WIFI renvoie l'ID déterministe issu de `{parentId, localId}` ou une erreur.
-5. C6-ZIGBEE relaie l'ID à MAIN_LIGHTING ; MAIN accuse réception. Les annonces
-   V5 des lampes ne sont relayées vers le registre CORE qu'après cette
-   attribution.
+- core_wifi_c6
+- core_zigbee_c6
+- main_light_c6
+- lamp_c6
 
-Les IDs sont stables dans un CORE, pas globalement uniques entre foyers. Une
-collision ou une identité incohérente est rejetée. Cette version suppose un
-seul PAN Zigbee.
+C6-WIFI n’active pas le provisioning Zigbee V5. Les deux profils CORE et les profils V5 restent compilés séparément.
 
-## Limites de cette étape
+## État des essais matériels
 
-Le transport Wi-Fi initialise une station, mais ne reçoit pas encore de
-credentials et ne démarre aucune API. Les tests natifs couvrent le codec UART,
-le flux d'attribution d'ID, les annonces répétées et les identités incohérentes.
+CORE-WIFI a rejoint le réseau local par DHCP et son API HTTP a été interrogée avec succès depuis un PC du même Wi-Fi. MAIN_LIGHTING et CORE-ZIGBEE ont également été essayés séparément sur Zigbee. Ces essais partiels ne démontrent pas encore le retour de l’ID attribué jusqu’au MAIN ni le remplissage du registre par la chaîne complète.
 
-Essais matériels provisoires : C6-WIFI initialise le Wi-Fi et l'UART;
-C6-ZIGBEE reçoit son ACK UART; MAIN_LIGHTING rejoint le PAN et ses annonces
-V7 sont reçues par C6-ZIGBEE. Le retour de l'ID calculé par C6-WIFI jusqu'au
-MAIN, les quatre modules liés, et la validation V5 de bout en bout avec le CORE
-restent à vérifier quand les cartes supplémentaires seront disponibles.
+La validation V7 attend l’essai simultané des quatre cartes : C6-WIFI, C6-ZIGBEE, MAIN_LIGHTING et LAMP_C6. Il faudra vérifier l’attribution et le retour d’ID, une annonce répétée sans doublon, le rejet d’une identité incohérente, les listes de l’API et la conservation du lien V5. Voir les résultats HTTP détaillés dans [API CORE V7.1](V7_1_CORE_API.md).

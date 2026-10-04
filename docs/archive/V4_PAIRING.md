@@ -1,3 +1,5 @@
+> Archive historique : conception V4 antérieure à l’intégration Zigbee V5. Pour le comportement actuel, voir [référence V5](../V5_ZIGBEE.md) et [CORE double C6](../V7_CORE_DOUBLE_C6.md).
+
 # V4 — Provisioning MAIN ↔ LAMP
 
 ## Portée

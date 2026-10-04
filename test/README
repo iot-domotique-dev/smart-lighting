@@ -1,20 +1,20 @@
-
 # Tests Smart Lighting
 
-Lancer la suite native avec PlatformIO :
+Les tests natifs s’exécutent sur le PC avec PlatformIO; ils ne nécessitent pas de carte :
 
-```bash
+~~~powershell
 pio test -e native
-```
+~~~
 
-Le profil `native` utilise Unity et compile les modules testés avec un faux `Arduino.h` limité à `Serial` et `millis()`. Il nécessite un compilateur C/C++ compatible GCC sur la machine hôte ; aucune carte ESP32 n'est nécessaire.
+Le compilateur C/C++ hôte doit être disponible pour l’environnement PlatformIO. La suite utilise Unity et un faux Arduino.h pour les composants qui en ont besoin.
 
-Les tests couvrent les capacités des registres, les valeurs de luminosité, les ACK/retries/timeouts, la réutilisation du tracker, la déduplication par `(sourceId, messageId)` et son éviction circulaire, les limites d'automatisation, les modes `ONCE`/`REPEAT` et les événements de changement de statut.
+## Couverture par dossier
 
-Les scénarios Wokwi ont été retirés avec les profils de lampe de démonstration. `SimulationTransport` reste utilisé par les tests natifs.
+- test_device_registry : registre et identités d’appareils.
+- test_stabilization : commandes, événements, statuts, retries et automatisations historiques.
+- test_v4_pairing : transitions du provisioning MAIN/LAMP et persistance simulée.
+- test_zigbee_message_codec : sérialisation des messages V5 transportés par Zigbee.
+- test_core_link : codec UART et règles d’annonces, d’attribution d’ID et d’identité V7.
+- test_core_api : réponses JSON, routes, erreurs HTTP et consultation du registre.
 
-## V4 native suite
-
-The test_v4_pairing suite contains 14 MAIN/LAMP provisioning cases: announcement over the existing SimulationTransport, discovery without automatic pairing, explicit commissioning, identity assignment and persistence, confirmation, reboot recovery, cross-MAIN rejection, registry duplicate checks, lookup and removal.
-
-The command pio test -e native runs both native test suites: the 9 V3.9 stabilization tests and the 14 V4 pairing tests.
+Les tests natifs vérifient la logique et la sérialisation. Ils ne remplacent pas les essais radio Zigbee, UART physique, Wi-Fi ou HTTP sur carte. L’état des essais matériels est suivi dans [la documentation V5](../docs/V5_ZIGBEE.md), [le CORE double C6](../docs/V7_CORE_DOUBLE_C6.md) et [l’API](../docs/V7_1_CORE_API.md).

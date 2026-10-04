@@ -1,3 +1,5 @@
+> Archive historique : contexte V2.7. L’état et les procédures actuels sont dans le [README du dépôt](../../README.md) et les [documents actifs](../README.md).
+
 # Smart Lighting --- Contexte historique du projet
 
 > Ce document décrit l'architecture avant V5. Les profils `lamp`, `lamp_a` et `lamp_b` sont retirés; la lampe actuelle est `lamp_c6`. Voir `README.md` pour l'état courant.

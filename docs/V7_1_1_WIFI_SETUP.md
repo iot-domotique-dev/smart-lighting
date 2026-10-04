@@ -1,82 +1,68 @@
-# V7.1.1 — Connexion Wi-Fi de CORE-WIFI
+# V7.1.1 — Wi-Fi de CORE-WIFI : configuration et essai
 
-V7.1.1 ajoute la connexion de CORE-WIFI au réseau local par DHCP. Le serveur HTTP démarre même si les credentials manquent ou si le point d'accès est momentanément indisponible. Le firmware retente automatiquement la connexion toutes les cinq secondes.
+## Identifiants locaux
 
-## Configurer SSID et mot de passe
+À la racine du dépôt, dans PowerShell :
 
-Depuis PowerShell, à la racine du dépôt :
-
-```powershell
+~~~powershell
 Copy-Item include/wifi_credentials.example.h include/wifi_credentials.h
 notepad include/wifi_credentials.h
-```
+~~~
 
-Remplace ensuite les deux valeurs par celles du réseau local :
+Renseigner ces deux macros dans include/wifi_credentials.h :
 
-```cpp
+~~~cpp
 #define SMART_LIGHTING_WIFI_SSID "NomDuReseau"
 #define SMART_LIGHTING_WIFI_PASSWORD "MotDePasseDuReseau"
-```
+~~~
 
-Enregistre le fichier. `include/wifi_credentials.h` est ignoré par Git. Ne colle pas les credentials dans le fichier `.example.h`, dans `platformio.ini`, ou dans un fichier source versionné. Le mot de passe n'est jamais écrit dans les logs série.
+Ce fichier local est ignoré par Git. Ne pas mettre les identifiants dans le fichier .example.h, dans platformio.ini ou dans les sources versionnées. Le mot de passe n’apparaît pas dans les logs série.
 
-Le mot de passe peut être vide pour un réseau ouvert. L'ESP32-C6 utilise le Wi-Fi 2,4 GHz. Assure-toi que le réseau ne bloque pas les clients Wi-Fi entre eux.
+Le CORE-WIFI utilise le Wi-Fi 2,4 GHz et DHCP. Le serveur HTTP démarre même si le réseau est indisponible ou si les identifiants manquent; le firmware retente automatiquement la connexion.
 
-## Compiler et flasher
+## Compiler, flasher et ouvrir le moniteur
 
-Remplace `COMx` par le port qui correspond au C6-WIFI. Repère-le en débranchant/rebranchant la carte puis en exécutant `pio device list`.
+Fermer d’abord tout moniteur déjà ouvert sur le port de la carte. Remplacer COMx par le port relevé après connexion de CORE-WIFI :
 
-```powershell
+~~~powershell
+pio device list
 pio run -e core_wifi_c6
 pio run -e core_wifi_c6 -t upload --upload-port COMx
 pio device monitor -p COMx -b 115200
-```
+~~~
 
-Par exemple, si le CORE-WIFI apparaît sur `COM9`, utilise `COM9` dans les deux dernières commandes. Ferme le moniteur série avant l'upload si PlatformIO indique que le port est déjà ouvert.
+Après modification des credentials, recompiler et reflasher.
 
-Pour modifier les credentials plus tard, édite `include/wifi_credentials.h`, puis recompile et reflashe avec les mêmes commandes.
+## Logs attendus
 
-## Logs série attendus
+Les messages utiles sont :
 
-La ligne de démarrage de l'API doit apparaître même si aucun réseau ne répond :
-
-```text
-[CORE-WIFI] HTTP API: ready on port 80
-```
-
-Avec un fichier de credentials valide, le cycle normal ressemble à ceci :
-
-```text
-[CORE-WIFI] Wi-Fi station ready; waiting for credentials
+~~~text
 [CORE-WIFI] Wi-Fi connection attempt, SSID: NomDuReseau
 [CORE-WIFI] Wi-Fi connected, SSID: NomDuReseau
-[CORE-WIFI] IP address: 192.168.1.42
+[CORE-WIFI] IP address: adresse attribuée par DHCP
 [CORE-WIFI] HTTP API: ready on port 80
-```
+~~~
 
-L'ordre exact des lignes API et connexion peut varier. Si le réseau disparaît, la console indique `Wi-Fi connection lost (reason=...)`, puis `Wi-Fi reconnect attempt` avec le SSID. Le mot de passe n'est jamais affiché.
+L’ordre des logs de connexion et de démarrage HTTP peut varier. En cas de perte du réseau, le moniteur affiche la déconnexion puis une nouvelle tentative. Le mot de passe ne doit jamais apparaître.
 
-Sans credentials, la console indique `Wi-Fi credentials not configured`; le serveur est démarré mais aucun client ne peut encore le joindre par Wi-Fi.
+Copier l’adresse de la ligne IP address après chaque démarrage ou reconnexion : DHCP peut fournir une autre adresse. Ne pas réutiliser une ancienne IP sans la vérifier.
 
-## Retrouver l'adresse IP
+## Tester l’accès local
 
-Lis `IP address` dans le moniteur série après `Wi-Fi connected`. L'adresse provient de DHCP. Tu peux aussi la retrouver dans la page des clients DHCP de ton routeur, en repérant l'ESP32-C6 ou son adresse MAC.
+Le PC ou le téléphone doit être sur le même réseau local, sans isolation des clients. Dans PowerShell, remplacer l’exemple par l’adresse IP la plus récente affichée par le CORE :
 
-Depuis PowerShell, définis l'adresse obtenue, sans `http://` :
-
-```powershell
+~~~powershell
 $CoreIp = "192.168.1.42"
-```
-
-Puis interroge l'API avec `curl.exe` :
-
-```powershell
+Test-NetConnection -ComputerName $CoreIp -Port 80
 curl.exe -i "http://$CoreIp/api/v1/health"
 curl.exe -i "http://$CoreIp/api/v1/core"
 curl.exe -i "http://$CoreIp/api/v1/modules"
 curl.exe -i "http://$CoreIp/api/v1/devices"
-```
+~~~
 
-Les réponses HTTP doivent commencer par `200 OK` et avoir `Content-Type: application/json`. Une liste vide est valide si aucun MAIN ou appareil n'a encore été inscrit dans le registre.
+Une valeur TcpTestSucceeded: True confirme l’accès TCP au port 80. Les routes de lecture répondent 200. Une liste vide est normale avant l’enregistrement des MAIN et appareils dans le registre CORE. Les formats détaillés et les erreurs HTTP sont dans [API locale V7.1](V7_1_CORE_API.md).
 
-L'API reste en HTTP local sans authentification. Ne redirige pas le port 80 du routeur vers Internet et n'utilise pas de réseau Wi-Fi invité qui isole les clients.
+Si la connexion échoue, vérifier l’IP dans les logs série, puis lancer ipconfig sur le PC. Celui-ci doit pouvoir joindre la même plage réseau; un réseau Wi-Fi invité ou l’option d’isolation des clients du routeur peut empêcher la connexion.
+
+L’API est en HTTP local sans authentification. Ne pas rediriger le port 80 du routeur vers Internet.

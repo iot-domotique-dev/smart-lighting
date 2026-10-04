@@ -1,3 +1,5 @@
+> Archive historique : instantané V2.9. L’état et les procédures actuels sont dans le [README du dépôt](../../README.md) et les [documents actifs](../README.md).
+
 # PROJECT CONTEXT — SMART LIGHTING
 
 ## Version actuelle : V2.9
