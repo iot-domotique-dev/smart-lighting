@@ -4,6 +4,8 @@
 
 La liaison V5 entre MAIN_LIGHTING et LAMP_C6 a été validée sur le matériel et reste la référence fonctionnelle du projet. Les évolutions du CORE ne doivent pas modifier le runtime de provisioning V5, son codec Zigbee, ni les firmwares main_light_c6 et lamp_c6 pour contourner un problème V7.
 
+Le 7 octobre 2026, ce chemin a été confirmé pendant la validation du montage V7 à quatre cartes : commandes `power` depuis MAIN, réception d’ACK et fonctionnement de la lampe confirmés par l’utilisateur. Le [CORE double C6](V7_CORE_DOUBLE_C6.md#validation-du-7-octobre-2026) consigne l’inventaire global en ligne et les 52 tests natifs réussis.
+
 ## Architecture
 
 ~~~text
@@ -27,6 +29,8 @@ power <deviceId> off
 ~~~
 
 La commande suit le mécanisme V5 d’ACK, de retry et de déduplication. LAMP_C6 applique l’état à la sortie configurée sur GPIO18. La luminosité PWM et les autres commandes d’éclairage ne font pas partie du chemin validé décrit ici.
+
+Le `deviceId` de cette console est l’ID local V5 attribué lors du pairing et affiché par MAIN. Il est distinct de l’ID global de la lampe renvoyé par `/api/v1/devices` dans V7.
 
 ## Profils et commandes PlatformIO
 

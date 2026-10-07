@@ -4,7 +4,7 @@
 
 V7.1 expose en lecture seule l’état du CORE et l’inventaire qu’il a reçu. Le serveur HTTP utilise le composant ESP-IDF esp_http_server et n’est compilé que pour core_wifi_c6. Aucune application mobile, route de commande, base de données, VPN ou service cloud n’est inclus.
 
-**Le Wi-Fi et les requêtes HTTP ont été vérifiés sur la carte CORE-WIFI. La validation matérielle complète V7 reste en attente** : les modules et appareils retournés par l’API dépendront du registre effectivement alimenté par la chaîne Zigbee et UART.
+**V7 a été validée sur le montage à quatre cartes le 7 octobre 2026**, d’après les captures HTTP et les confirmations de l’utilisateur. La capture finale de l’API contient MAIN_LIGHTING et sa lampe `lamp001`, tous deux online. Le registre est alimenté par le parcours Zigbee et UART. Les résultats matériels et les **52 tests natifs réussis** sont consignés dans [CORE double C6](V7_CORE_DOUBLE_C6.md#validation-du-7-octobre-2026).
 
 ## Architecture
 
@@ -165,14 +165,64 @@ Les erreurs partagent cette forme :
 - Le firmware CORE-WIFI a été mesuré à **978 900 octets sur 1 048 576 (93,4 %)** pour la partition application, soit environ 69 676 octets libres. La marge est limitée; toute nouvelle dépendance ou fonctionnalité doit être mesurée.
 - Le champ firmware_version observé lors de l’essai affichait v7.0.0-dirty; il s’agit de la métadonnée de build embarquée, distincte du jalon fonctionnel documenté ici.
 
-## Résultat du test réseau sur carte
+## Résultats des tests réseau sur carte
 
 Depuis un PC connecté au même Wi-Fi que CORE-WIFI :
 
 - le port TCP 80 était joignable;
-- /health, /core, /modules et /devices ont répondu 200;
-- /modules et /devices ont renvoyé des listes vides, car aucune entrée n’était encore présente dans le registre;
+- le 7 octobre 2026, GET /api/v1/health, /api/v1/core, /api/v1/modules et /api/v1/devices ont tous répondu 200;
+- health a indiqué status: ok, core_id: 1, wifi_connected: true et uart_driver_ready: true;
+- modules a retourné MAIN_LIGHTING (ID 4074601247, parent_id 1) et devices a retourné lamp001 (ID 3559985816, parent_id 4074601247);
+- la capture finale a renvoyé `online: true` et `status: online` pour les deux entrées, avec `count: 1` dans chaque collection;
+- des relevés intermédiaires avaient montré des listes vides ou des entrées offline. Après nettoyage des données d’un ancien réseau Zigbee, l’utilisateur a confirmé le fonctionnement du montage actuel;
+- la version rapportée par les deux routes CORE était v7.0.0-dirty;
 - les recherches d’IDs inconnus dans /modules/{id} et /devices/{id} ont répondu 404;
 - POST sur /api/v1/core a répondu 405 et annoncé Allow: GET.
 
-Ces résultats valident le démarrage Wi-Fi/HTTP et le contrat réseau en lecture. Ils ne valident pas le parcours d’annonces ni l’attribution d’ID V7 entre les quatre cartes. Voir le suivi du [CORE double C6](V7_CORE_DOUBLE_C6.md).
+### Capture finale de l’inventaire
+
+GET `/api/v1/modules` :
+
+~~~json
+{
+  "modules": [
+    {
+      "id": 4074601247,
+      "name": "MAIN_LIGHTING",
+      "role": "main",
+      "online": true,
+      "status": "online",
+      "parent_id": 1,
+      "capabilities": ["lighting", "groups", "scenes", "automation"],
+      "last_seen_ms": 53088,
+      "state": null
+    }
+  ],
+  "count": 1
+}
+~~~
+
+GET `/api/v1/devices` :
+
+~~~json
+{
+  "devices": [
+    {
+      "id": 3559985816,
+      "name": "lamp001",
+      "role": "lamp",
+      "online": true,
+      "status": "online",
+      "parent_id": 4074601247,
+      "capabilities": [],
+      "last_seen_ms": 56808,
+      "state": null
+    }
+  ],
+  "count": 1
+}
+~~~
+
+Ces valeurs proviennent de la capture finale; les IDs et `last_seen_ms` dépendent du montage et du démarrage. La lampe a annoncé une liste de capacités vide dans cet essai. Les exemples de ressources individuelles plus haut illustrent le contrat JSON et ne sont pas des relevés de cette lampe.
+
+La commande d’éclairage a été vérifiée séparément depuis la console V5 du MAIN, avec réception d’ACK et fonctionnement confirmé par l’utilisateur. L’API V7.1 reste en lecture seule et `state: null` reste attendu après une commande V5. Voir le [suivi matériel du CORE double C6](V7_CORE_DOUBLE_C6.md#validation-du-7-octobre-2026).

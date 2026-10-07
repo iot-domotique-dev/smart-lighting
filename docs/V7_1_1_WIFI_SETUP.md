@@ -63,6 +63,8 @@ curl.exe -i "http://$CoreIp/api/v1/devices"
 
 Une valeur TcpTestSucceeded: True confirme l’accès TCP au port 80. Les routes de lecture répondent 200. Une liste vide est normale avant l’enregistrement des MAIN et appareils dans le registre CORE. Les formats détaillés et les erreurs HTTP sont dans [API locale V7.1](V7_1_CORE_API.md).
 
+Lors de la validation complète du 7 octobre 2026, les collections ont retourné un MAIN et une lampe online (`count: 1` chacune). Si les listes restent vides alors que les cartes sont allumées, vérifier le trajet Zigbee/UART et l’appartenance au PAN du MAIN. Le nettoyage d’un ancien état réseau Zigbee a résolu ce blocage pendant l’essai; voir le [diagnostic du CORE double C6](V7_CORE_DOUBLE_C6.md#diagnostic-zigbee-et-uart).
+
 Si la connexion échoue, vérifier l’IP dans les logs série, puis lancer ipconfig sur le PC. Celui-ci doit pouvoir joindre la même plage réseau; un réseau Wi-Fi invité ou l’option d’isolation des clients du routeur peut empêcher la connexion.
 
 L’API est en HTTP local sans authentification. Ne pas rediriger le port 80 du routeur vers Internet.
