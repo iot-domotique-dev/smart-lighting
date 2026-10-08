@@ -294,6 +294,50 @@ void test_paired_lamp_announcement_uses_core_assigned_main_parent_id() {
         registry, response.coreId)->parentId);
 }
 
+void test_lamp_reannouncement_preserves_state_only_for_same_v7_identity() {
+    const uint32_t mainLocalId = 0x12345678;
+    const uint32_t mainId = makeCoreModuleId(CORE_LOGICAL_ID, mainLocalId);
+    DeviceRegistry registry;
+    initRegistryWithCoreRoot(registry);
+
+    CoreModuleAnnouncement main = {
+        mainLocalId, CORE_LOGICAL_ID, "MAIN_LIGHTING", DeviceRole::MAIN,
+        DEVICE_CAP_LIGHTING
+    };
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreModuleUpdateResult::REGISTERED),
+        static_cast<int>(ingestCoreModuleAnnouncement(registry, main, 100)));
+
+    CoreModuleAnnouncement lampAnnouncement = {
+        17, mainId, "LAMP_C6", DeviceRole::LAMP, DEVICE_CAP_POWER
+    };
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreModuleUpdateResult::REGISTERED),
+        static_cast<int>(ingestCoreModuleAnnouncement(registry, lampAnnouncement, 200)));
+    const uint32_t lampId = makeCoreModuleId(mainId, lampAnnouncement.localId);
+    Device* lamp = findDeviceById(registry, lampId);
+    TEST_ASSERT_NOT_NULL(lamp);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::UNKNOWN),
+                          static_cast<int>(lamp->lastConfirmedPower));
+    lamp->lastConfirmedPower = LastConfirmedPower::ON;
+    lamp->lastConfirmedPowerStatus = LastConfirmedPowerStatus::CONFIRMED;
+
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreModuleUpdateResult::UPDATED),
+        static_cast<int>(ingestCoreModuleAnnouncement(registry, lampAnnouncement, 300)));
+    lamp = findDeviceById(registry, lampId);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::ON),
+                          static_cast<int>(lamp->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::CONFIRMED),
+                          static_cast<int>(lamp->lastConfirmedPowerStatus));
+
+    lampAnnouncement.localId = 18;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreModuleUpdateResult::REGISTERED),
+        static_cast<int>(ingestCoreModuleAnnouncement(registry, lampAnnouncement, 400)));
+    Device* replacement = findDeviceById(
+        registry, makeCoreModuleId(mainId, lampAnnouncement.localId));
+    TEST_ASSERT_NOT_NULL(replacement);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::UNKNOWN),
+                          static_cast<int>(replacement->lastConfirmedPower));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_uart_announcement_frame_round_trip);
@@ -302,5 +346,6 @@ int main(int, char**) {
     RUN_TEST(test_main_announcement_crosses_uart_and_returns_assigned_id);
     RUN_TEST(test_repeated_announcement_updates_without_duplicate_and_conflict_is_rejected);
     RUN_TEST(test_paired_lamp_announcement_uses_core_assigned_main_parent_id);
+    RUN_TEST(test_lamp_reannouncement_preserves_state_only_for_same_v7_identity);
     return UNITY_END();
 }

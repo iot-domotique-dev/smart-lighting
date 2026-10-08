@@ -3,6 +3,20 @@
 #include "core_module_service.h"
 #include "message_id_generator.h"
 
+namespace {
+bool isTrackedPowerCommand(const Message& message) {
+    return isCoreCommandMessage(message) &&
+        message.commandType == static_cast<int32_t>(ActionType::SET_LAMP_POWER);
+}
+
+bool sameLampIdentity(const Device& device, const Message& command) {
+    return device.role == DeviceRole::LAMP &&
+        device.id == command.destinationId &&
+        device.parentId == command.parentMainId &&
+        device.localId == command.provisioningDeviceId;
+}
+}  // namespace
+
 CoreCommandService::CoreCommandService(DeviceRegistry& devices,
     MessageTracker& messages, Communication& commandLink)
     : registry(devices), tracker(messages), link(commandLink) {}
@@ -35,6 +49,16 @@ CoreCommandError CoreCommandService::submitPower(uint32_t destinationId,
     command.provisioningDeviceId = lamp->localId;
     if (findPendingMessage(tracker, command.id) != nullptr)
         return CoreCommandError::DUPLICATE_ID;
+
+    bool overlapsSameLampCommand = false;
+    for (uint8_t index = 0; index < tracker.count; ++index) {
+        const PendingMessage& pending = tracker.messages[index];
+        if (pending.waitingForAck && isTrackedPowerCommand(pending.message) &&
+            pending.message.destinationId == destinationId) {
+            overlapsSameLampCommand = true;
+        }
+    }
+
     if (!trackMessage(tracker, command)) return CoreCommandError::TRACKER_FULL;
     messageId = command.id;
     if (!sendMessage(link, command)) {
@@ -43,25 +67,73 @@ CoreCommandError CoreCommandService::submitPower(uint32_t destinationId,
         (void)processAck(tracker, failure);
         return CoreCommandError::TRANSPORT_FAILURE;
     }
+
+    PendingMessage* submitted = findPendingMessage(tracker, command.id);
+    if (submitted != nullptr) {
+        submitted->executionOrderAmbiguous = overlapsSameLampCommand ||
+            lamp->powerExecutionUnknown;
+    }
+    if (overlapsSameLampCommand) {
+        for (uint8_t index = 0; index < tracker.count; ++index) {
+            PendingMessage& pending = tracker.messages[index];
+            if (pending.waitingForAck && isTrackedPowerCommand(pending.message) &&
+                pending.message.destinationId == destinationId) {
+                pending.executionOrderAmbiguous = true;
+            }
+        }
+        Device* currentLamp = findDeviceById(registry, destinationId);
+        if (currentLamp != nullptr) markLastConfirmedPowerStale(*currentLamp);
+    }
     return CoreCommandError::NONE;
 }
 
 bool CoreCommandService::handleReply(const Message& message) {
     if (!isCoreCommandReply(message)) return false;
-    const PendingMessage* pending = findPendingMessage(tracker,
+    PendingMessage* pending = findPendingMessage(tracker,
         static_cast<uint32_t>(message.value2));
     if (pending != nullptr && pending->waitingForAck &&
         millis() - pending->firstSentAt >=
             MESSAGE_TIMEOUT * (static_cast<uint32_t>(MAX_MESSAGE_RETRIES) + 1)) {
         // A queued ACK must not win over the absolute deadline merely because
         // UART reception is polled before the timeout task in this iteration.
-        (void)updateMessageTimeouts(tracker, link);
+        poll();
         return false;
     }
-    return processAck(tracker, message);
+
+    const Message original = pending != nullptr ? pending->message : Message{};
+    const bool executionOrderAmbiguous = pending != nullptr &&
+        pending->executionOrderAmbiguous;
+    if (!processAck(tracker, message)) return false;
+
+    if (!isTrackedPowerCommand(original) ||
+        message.executionStatus != ExecutionStatus::EXECUTED) {
+        return true;
+    }
+
+    Device* lamp = findDeviceById(registry, original.destinationId);
+    if (lamp == nullptr || !sameLampIdentity(*lamp, original)) return true;
+    if (executionOrderAmbiguous || lamp->powerExecutionUnknown) {
+        markLastConfirmedPowerStale(*lamp);
+        return true;
+    }
+
+    lamp->lastConfirmedPower = original.value == 1
+        ? LastConfirmedPower::ON : LastConfirmedPower::OFF;
+    lamp->lastConfirmedPowerStatus = LastConfirmedPowerStatus::CONFIRMED;
+    return true;
 }
 
-void CoreCommandService::poll() { (void)updateMessageTimeouts(tracker, link); }
+void CoreCommandService::poll() {
+    (void)updateMessageTimeouts(tracker, link);
+    for (uint8_t index = 0; index < tracker.count; ++index) {
+        const PendingMessage& pending = tracker.messages[index];
+        if (!pending.timedOut || !isTrackedPowerCommand(pending.message)) continue;
+        Device* lamp = findDeviceById(registry, pending.message.destinationId);
+        if (lamp == nullptr || !sameLampIdentity(*lamp, pending.message)) continue;
+        lamp->powerExecutionUnknown = true;
+        markLastConfirmedPowerStale(*lamp);
+    }
+}
 
 CoreCommandBridge::CoreCommandBridge(Communication& radio, Communication& uartLink)
     : zigbee(radio), coreLink(uartLink) {}

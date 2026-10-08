@@ -122,6 +122,7 @@ void test_module_item_returns_known_main_and_unknown_module_is_404() {
     TEST_ASSERT_EQUAL_UINT16(200, request("GET", path, length));
     assertContains("\"module\":{\"id\":");
     assertContains("\"state\":null");
+    TEST_ASSERT_NULL(strstr(response, "\"last_confirmed_state\""));
 
     TEST_ASSERT_EQUAL_UINT16(404,
         request("GET", "/api/v1/modules/987654321", length));
@@ -145,6 +146,7 @@ void test_devices_list_and_known_device_report_connectivity_not_fake_domain_stat
     assertContains("\"status\":\"offline\"");
     assertContains("\"parent_id\":");
     assertContains("\"state\":null");
+    assertContains("\"last_confirmed_state\":{\"power\":null,\"status\":\"unknown\"}");
     assertContains("\"count\":1");
     TEST_ASSERT_NULL(strstr(response, "MAIN_LIGHTING"));
 
@@ -155,6 +157,35 @@ void test_devices_list_and_known_device_report_connectivity_not_fake_domain_stat
     assertContains("\"device\":{\"id\":");
     assertContains("\"online\":false");
     assertContains("\"state\":null");
+    assertContains("\"last_confirmed_state\":{\"power\":null,\"status\":\"unknown\"}");
+}
+
+void test_last_confirmed_power_is_additive_and_offline_history_is_stale() {
+    const uint32_t mainLocalId = 0x1234;
+    const uint32_t mainId = makeCoreModuleId(CORE_LOGICAL_ID, mainLocalId);
+    const uint32_t lampId = makeCoreModuleId(mainId, 17);
+    addDevice(mainId, "MAIN_LIGHTING", DeviceRole::MAIN,
+              DeviceStatus::ONLINE, CORE_LOGICAL_ID, mainLocalId);
+    addDevice(lampId, "LAMP_C6", DeviceRole::LAMP,
+              DeviceStatus::ONLINE, mainId, 17, DEVICE_CAP_POWER);
+    Device* lamp = findDeviceById(registry, lampId);
+    TEST_ASSERT_NOT_NULL(lamp);
+    lamp->lastConfirmedPower = LastConfirmedPower::ON;
+    lamp->lastConfirmedPowerStatus = LastConfirmedPowerStatus::CONFIRMED;
+
+    size_t length = 0;
+    TEST_ASSERT_EQUAL_UINT16(200, request("GET", "/api/v1/devices", length));
+    assertContains("\"state\":null");
+    assertContains("\"last_confirmed_state\":{\"power\":\"on\",\"status\":\"confirmed\"}");
+
+    TEST_ASSERT_TRUE(setDeviceStatus(registry, lampId, DeviceStatus::OFFLINE, 9000));
+    char path[64] = {};
+    snprintf(path, sizeof(path), "/api/v1/devices/%lu",
+             static_cast<unsigned long>(lampId));
+    TEST_ASSERT_EQUAL_UINT16(200, request("GET", path, length));
+    assertContains("\"online\":false");
+    assertContains("\"state\":null");
+    assertContains("\"last_confirmed_state\":{\"power\":\"on\",\"status\":\"stale\"}");
 }
 
 void test_unknown_device_is_404() {
@@ -222,6 +253,7 @@ int main(int, char**) {
     RUN_TEST(test_modules_list_filters_by_main_role_and_preserves_ids);
     RUN_TEST(test_module_item_returns_known_main_and_unknown_module_is_404);
     RUN_TEST(test_devices_list_and_known_device_report_connectivity_not_fake_domain_state);
+    RUN_TEST(test_last_confirmed_power_is_additive_and_offline_history_is_stale);
     RUN_TEST(test_unknown_device_is_404);
     RUN_TEST(test_invalid_ids_unknown_routes_and_unsupported_methods_have_http_errors);
     RUN_TEST(test_empty_inventory_returns_empty_arrays);

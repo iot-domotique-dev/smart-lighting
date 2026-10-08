@@ -131,7 +131,36 @@ bool appendCapabilities(JsonWriter& writer, uint32_t capabilities) {
     return appendCharacter(writer, ']');
 }
 
-bool appendDevice(JsonWriter& writer, const Device& device) {
+bool appendLastConfirmedState(JsonWriter& writer, const Device& device) {
+    if (device.role != DeviceRole::LAMP) {
+        return appendLiteral(writer, ",\"last_confirmed_state\":null");
+    }
+
+    const bool known =
+        (device.lastConfirmedPower == LastConfirmedPower::ON ||
+         device.lastConfirmedPower == LastConfirmedPower::OFF) &&
+        device.lastConfirmedPowerStatus != LastConfirmedPowerStatus::UNKNOWN;
+    const bool stale = known &&
+        (device.lastConfirmedPowerStatus == LastConfirmedPowerStatus::STALE ||
+         device.powerExecutionUnknown || !isOnline(device));
+    const char* status = !known ? "unknown" : (stale ? "stale" : "confirmed");
+
+    if (!appendLiteral(writer, ",\"last_confirmed_state\":{\"power\":")) {
+        return false;
+    }
+    if (!known) {
+        if (!appendLiteral(writer, "null")) return false;
+    } else if (!appendJsonString(writer,
+                   device.lastConfirmedPower == LastConfirmedPower::ON ? "on" : "off")) {
+        return false;
+    }
+    return appendLiteral(writer, ",\"status\":") &&
+           appendJsonString(writer, status) &&
+           appendCharacter(writer, '}');
+}
+
+bool appendDevice(JsonWriter& writer, const Device& device,
+                  bool includeLastConfirmedState) {
     return appendLiteral(writer, "{\"id\":") &&
            appendUnsigned(writer, device.id) &&
            appendLiteral(writer, ",\"name\":") &&
@@ -148,7 +177,9 @@ bool appendDevice(JsonWriter& writer, const Device& device) {
            appendCapabilities(writer, device.capabilities) &&
            appendLiteral(writer, ",\"last_seen_ms\":") &&
            appendUnsigned(writer, device.lastSeen) &&
-           appendLiteral(writer, ",\"state\":null}");
+           appendLiteral(writer, ",\"state\":null") &&
+           (!includeLastConfirmedState || appendLastConfirmedState(writer, device)) &&
+           appendCharacter(writer, '}');
 }
 
 bool appendError(JsonWriter& writer, const char* code, const char* message) {
@@ -351,7 +382,7 @@ uint16_t handleCoreApiRequest(
                     continue;
                 }
                 if (!first) success = appendCharacter(writer, ',');
-                if (success) success = appendDevice(writer, device);
+                if (success) success = appendDevice(writer, device, !modules);
                 first = false;
                 ++count;
             }
@@ -376,7 +407,8 @@ uint16_t handleCoreApiRequest(
             success = appendLiteral(writer, "{\"") &&
                       appendLiteral(writer, resource) &&
                       appendLiteral(writer, "\":") &&
-                      appendDevice(writer, *device) &&
+                      appendDevice(writer, *device,
+                                   route.kind == RouteKind::DEVICE_ITEM) &&
                       appendCharacter(writer, '}');
             break;
         }

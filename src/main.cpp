@@ -166,7 +166,10 @@ void setup() {
         millis(),
         0,
         0,
-        CORE_LOGICAL_ID
+        CORE_LOGICAL_ID,
+        LastConfirmedPower::UNKNOWN,
+        LastConfirmedPowerStatus::UNKNOWN,
+        false
     };
     if (!registerDevice(coreDeviceRegistry, coreDevice)) {
         Serial.println("[CORE] failed to register its root device");

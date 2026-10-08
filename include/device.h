@@ -27,6 +27,18 @@ enum DeviceCapability : uint32_t {
     DEVICE_CAP_SECURITY_MODE = 1UL << 10
 };
 
+enum class LastConfirmedPower : uint8_t {
+    UNKNOWN,
+    OFF,
+    ON
+};
+
+enum class LastConfirmedPowerStatus : uint8_t {
+    UNKNOWN,
+    CONFIRMED,
+    STALE
+};
+
 
 struct Device {
 
@@ -47,7 +59,21 @@ struct Device {
     /* ID in the owner's namespace; Device::id is the CORE-wide ID. */
     uint32_t localId;
 
+    /* Historical software result of SET_POWER, never electrical readback. */
+    LastConfirmedPower lastConfirmedPower;
+    LastConfirmedPowerStatus lastConfirmedPowerStatus;
+    /* Sticky until reboot: an expired command may still execute late. */
+    bool powerExecutionUnknown;
+
 };
+
+inline void markLastConfirmedPowerStale(Device& device) {
+    if (device.role == DeviceRole::LAMP &&
+        device.lastConfirmedPower != LastConfirmedPower::UNKNOWN &&
+        device.lastConfirmedPowerStatus == LastConfirmedPowerStatus::CONFIRMED) {
+        device.lastConfirmedPowerStatus = LastConfirmedPowerStatus::STALE;
+    }
+}
 
 inline bool hasDeviceCapability(
     const Device& device,

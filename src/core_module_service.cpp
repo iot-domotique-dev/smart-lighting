@@ -81,6 +81,9 @@ CoreModuleUpdateResult ingestCoreModuleAnnouncement(
         updated.capabilities = announcement.capabilities;
         updated.parentId = announcement.parentId;
         updated.localId = announcement.localId;
+        updated.lastConfirmedPower = existing->lastConfirmedPower;
+        updated.lastConfirmedPowerStatus = existing->lastConfirmedPowerStatus;
+        updated.powerExecutionUnknown = existing->powerExecutionUnknown;
         if (!updateDevice(registry, updated)) {
             return CoreModuleUpdateResult::IDENTITY_CONFLICT;
         }

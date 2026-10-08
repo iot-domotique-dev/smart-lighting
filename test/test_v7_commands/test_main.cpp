@@ -41,10 +41,13 @@ bool receiveMessage(Communication& communication, Message& message) {
 namespace {
 constexpr uint32_t MAIN_LOCAL = 0x12345678;
 constexpr uint32_t LAMP_LOCAL = 17;
+constexpr uint32_t SECOND_LAMP_LOCAL = 18;
 constexpr uint32_t FIRST_COMMAND = 0x82340042;  // Full uint32_t, never UART sequence.
+constexpr uint32_t SECOND_COMMAND = FIRST_COMMAND + 1;
 constexpr uint16_t CORE_PHYSICAL = 0x1122;
 constexpr uint16_t MAIN_PHYSICAL = 0x2233;
 constexpr uint16_t LAMP_PHYSICAL = 0x3344;
+constexpr uint16_t SECOND_LAMP_PHYSICAL = 0x4455;
 
 struct Envelope {
     Message message;
@@ -139,23 +142,28 @@ class Network {
     size_t bridgeIndex = 0;
     size_t mainIndex = 0;
     size_t lampIndex = 0;
+    size_t secondLampIndex = 0;
     size_t uartReplyIndex = 0;
 public:
     uint32_t lampLocal;
     uint32_t mainId = makeCoreModuleId(CORE_LOGICAL_ID, MAIN_LOCAL);
     uint32_t lampId;
+    uint32_t secondLampLocal;
+    uint32_t secondLampId;
     DeviceRegistry registry = {};
-    LampRegistry mainLamps = {}, lampLamps = {};
+    LampRegistry mainLamps = {}, lampLamps = {}, secondLampLamps = {};
     GroupRegistry groups = {};
     SceneRegistry scenes = {};
-    MessageTracker coreTracker = {}, lampTracker = {};
-    MessageDeduplicator lampDedup = {};
-    WireTransport wifiUart{true}, bridgeUart{true}, bridgeRadio, mainRadio, lampRadio;
+    MessageTracker coreTracker = {}, lampTracker = {}, secondLampTracker = {};
+    MessageDeduplicator lampDedup = {}, secondLampDedup = {};
+    WireTransport wifiUart{true}, bridgeUart{true}, bridgeRadio, mainRadio,
+        lampRadio, secondLampRadio;
     Communication wifiLink = communication(wifiUart, CORE_LOGICAL_ID);
     Communication bridgeLink = communication(bridgeUart, CORE_LOGICAL_ID);
     Communication bridgeZigbee = communication(bridgeRadio, CORE_LOGICAL_ID);
     Communication mainZigbee = communication(mainRadio, MAIN_LOCAL);
     Communication lampZigbee = communication(lampRadio, lampLocal);
+    Communication secondLampZigbee = communication(secondLampRadio, secondLampLocal);
     CoreCommandService core{registry, coreTracker, wifiLink};
     CoreCommandBridge bridge{bridgeZigbee, bridgeLink};
     MainCommandRelay relay{mainZigbee, mainLamps};
@@ -170,17 +178,23 @@ public:
     unsigned rejectedReplies = 0;
     bool exercisePhysicalRoutes;
 
-    explicit Network(uint32_t localLampId = LAMP_LOCAL, bool routePhysical = false)
+    explicit Network(uint32_t localLampId = LAMP_LOCAL, bool routePhysical = false,
+                     bool includeSecondLamp = false)
         : lampLocal(localLampId), lampId(makeCoreModuleId(mainId, localLampId)),
+          secondLampLocal(includeSecondLamp ? SECOND_LAMP_LOCAL : 0),
+          secondLampId(makeCoreModuleId(mainId, secondLampLocal)),
           exercisePhysicalRoutes(routePhysical) {
         initDeviceRegistry(registry);
         initLampRegistry(mainLamps);
         initLampRegistry(lampLamps);
+        initLampRegistry(secondLampLamps);
         initGroupRegistry(groups);
         initSceneRegistry(scenes);
         initMessageTracker(coreTracker);
         initMessageTracker(lampTracker);
+        initMessageTracker(secondLampTracker);
         initMessageDeduplicator(lampDedup);
+        initMessageDeduplicator(secondLampDedup);
         Device root = {};
         root.id = CORE_LOGICAL_ID;
         root.name = "CORE";
@@ -213,10 +227,31 @@ public:
         localLamp.identity.pairingState = PairingState::PAIRED;
         TEST_ASSERT_TRUE(addLamp(mainLamps, localLamp));
         TEST_ASSERT_TRUE(addLamp(lampLamps, localLamp));
+        if (secondLampLocal != 0) {
+            Device secondLamp = {};
+            secondLamp.id = secondLampId;
+            secondLamp.name = "lamp002";
+            secondLamp.role = DeviceRole::LAMP;
+            secondLamp.status = DeviceStatus::ONLINE;
+            secondLamp.parentId = mainId;
+            secondLamp.localId = secondLampLocal;
+            TEST_ASSERT_TRUE(registerDevice(registry, secondLamp));
+
+            Lamp secondMainLamp = {};
+            secondMainLamp.device.id = secondLampLocal;
+            secondMainLamp.device.name = "lamp002";
+            secondMainLamp.device.role = DeviceRole::LAMP;
+            secondMainLamp.device.status = DeviceStatus::ONLINE;
+            secondMainLamp.identity.parentMainId = MAIN_LOCAL;
+            secondMainLamp.identity.pairingState = PairingState::PAIRED;
+            TEST_ASSERT_TRUE(addLamp(mainLamps, secondMainLamp));
+            TEST_ASSERT_TRUE(addLamp(secondLampLamps, secondMainLamp));
+        }
         bridge.setMain(MAIN_LOCAL, mainId);
         relay.setMain(MAIN_LOCAL, mainId);
         if (exercisePhysicalRoutes) {
-            bridgeRadio.enforceRoutes = mainRadio.enforceRoutes = lampRadio.enforceRoutes = true;
+            bridgeRadio.enforceRoutes = mainRadio.enforceRoutes =
+                lampRadio.enforceRoutes = secondLampRadio.enforceRoutes = true;
             seedRoutesFromAnnouncements();
         }
     }
@@ -228,6 +263,8 @@ public:
         // Broadcasts establish the same physical routes as the APS RX callback.
         bridgeRadio.routes.remember(mainAnnouncement, MAIN_PHYSICAL);
         lampRadio.routes.remember(mainAnnouncement, MAIN_PHYSICAL);
+        if (secondLampLocal != 0)
+            secondLampRadio.routes.remember(mainAnnouncement, MAIN_PHYSICAL);
         Message assignment = {};
         TEST_ASSERT_TRUE(makeCoreIdAssignedMessage(MAIN_LOCAL, mainId,
             static_cast<uint8_t>(CoreModuleUpdateResult::REGISTERED), assignment));
@@ -246,12 +283,29 @@ public:
         strcpy(lampAnnouncement.hardwareId, "C6-LAMP001");
         mainRadio.routes.remember(lampAnnouncement, LAMP_PHYSICAL);
         bridgeRadio.routes.remember(lampAnnouncement, LAMP_PHYSICAL);
+        if (secondLampLocal != 0) {
+            Message secondAnnouncement = {};
+            secondAnnouncement.type = MessageType::DEVICE_ANNOUNCE;
+            secondAnnouncement.sourceId = secondLampLocal;
+            secondAnnouncement.provisioningDeviceId = secondLampLocal;
+            secondAnnouncement.parentMainId = MAIN_LOCAL;
+            secondAnnouncement.pairingState =
+                static_cast<uint8_t>(PairingState::PAIRED);
+            secondAnnouncement.deviceRole = static_cast<uint8_t>(DeviceRole::LAMP);
+            strcpy(secondAnnouncement.hardwareId, "C6-LAMP002");
+            mainRadio.routes.remember(secondAnnouncement, SECOND_LAMP_PHYSICAL);
+            bridgeRadio.routes.remember(secondAnnouncement, SECOND_LAMP_PHYSICAL);
+        }
     }
 
     void submit(bool power = true, uint32_t id = FIRST_COMMAND) {
+        submitTo(lampId, power, id);
+    }
+
+    void submitTo(uint32_t destinationId, bool power, uint32_t id) {
         uint32_t messageId = 0;
         TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreCommandError::NONE),
-            static_cast<int>(core.submitPower(lampId, power, messageId, id)));
+            static_cast<int>(core.submitPower(destinationId, power, messageId, id)));
         TEST_ASSERT_EQUAL_UINT32(id, messageId);
     }
 
@@ -263,15 +317,27 @@ public:
         while (mainIndex < mainRadio.sent.size()) {
             const Envelope envelope = mainRadio.sent[mainIndex++];
             if (envelope.message.type == MessageType::COMMAND) {
-                TEST_ASSERT_EQUAL_UINT32(lampLocal, envelope.hop);
+                const bool firstLamp = envelope.hop == lampLocal;
+                const bool secondLamp = secondLampLocal != 0 &&
+                    envelope.hop == secondLampLocal;
+                TEST_ASSERT_TRUE(firstLamp || secondLamp);
+                const uint32_t expectedId = firstLamp ? lampId : secondLampId;
+                TEST_ASSERT_EQUAL_UINT32(expectedId, envelope.message.destinationId);
+                TEST_ASSERT_EQUAL_UINT32(envelope.hop,
+                                         envelope.message.provisioningDeviceId);
                 TEST_ASSERT_EQUAL_INT(static_cast<int>(CommunicationRouteScope::LOCAL_DEVICE),
                                       static_cast<int>(envelope.scope));
                 if (dropMainToLamp != 0) { --dropMainToLamp; continue; }
                 if (exercisePhysicalRoutes) {
-                    TEST_ASSERT_EQUAL_UINT16(LAMP_PHYSICAL, envelope.physicalDestination);
-                    lampRadio.routes.remember(envelope.message, MAIN_PHYSICAL);
+                    TEST_ASSERT_EQUAL_UINT16(
+                        firstLamp ? LAMP_PHYSICAL : SECOND_LAMP_PHYSICAL,
+                        envelope.physicalDestination);
+                    WireTransport& targetRadio = firstLamp
+                        ? lampRadio : secondLampRadio;
+                    targetRadio.routes.remember(envelope.message, MAIN_PHYSICAL);
                 }
-                lampRadio.incoming.push_back(envelope.message);
+                (firstLamp ? lampRadio : secondLampRadio).incoming.push_back(
+                    envelope.message);
             } else {
                 TEST_ASSERT_EQUAL_UINT32(CORE_LOGICAL_ID, envelope.hop);
                 TEST_ASSERT_EQUAL_INT(static_cast<int>(CommunicationRouteScope::CORE),
@@ -323,6 +389,10 @@ public:
         consumeUartReplies();
         processMessages(lampZigbee, lampTracker, lampDedup, lampLamps, groups,
                         scenes, dropAckAtLamp);
+        if (secondLampLocal != 0) {
+            processMessages(secondLampZigbee, secondLampTracker, secondLampDedup,
+                            secondLampLamps, groups, scenes, false);
+        }
         while (lampIndex < lampRadio.sent.size()) {
             const Envelope envelope = lampRadio.sent[lampIndex++];
             TEST_ASSERT_EQUAL_UINT32(MAIN_LOCAL, envelope.hop);
@@ -332,6 +402,17 @@ public:
                 mainRadio.routes.remember(envelope.message, LAMP_PHYSICAL);
                 // A new LAMP broadcast between the receipt and execution ACK
                 // must never replace the numeric CORE 1 physical route.
+                refreshLampAnnouncement();
+            }
+            TEST_ASSERT_TRUE(relay.handleMessage(envelope.message));
+        }
+        while (secondLampIndex < secondLampRadio.sent.size()) {
+            const Envelope envelope = secondLampRadio.sent[secondLampIndex++];
+            TEST_ASSERT_EQUAL_UINT32(MAIN_LOCAL, envelope.hop);
+            if (dropLampToMain != 0) { --dropLampToMain; continue; }
+            if (exercisePhysicalRoutes) {
+                TEST_ASSERT_EQUAL_UINT16(MAIN_PHYSICAL, envelope.physicalDestination);
+                mainRadio.routes.remember(envelope.message, SECOND_LAMP_PHYSICAL);
                 refreshLampAnnouncement();
             }
             TEST_ASSERT_TRUE(relay.handleMessage(envelope.message));
@@ -396,10 +477,22 @@ void tearDown() {}
 
 void test_set_power_traverses_uart_main_lamp_and_execution_ack_returns() {
     Network network;
+    Device* coreLamp = findDeviceById(network.registry, network.lampId);
+    TEST_ASSERT_NOT_NULL(coreLamp);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::UNKNOWN),
+                          static_cast<int>(coreLamp->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::UNKNOWN),
+                          static_cast<int>(coreLamp->lastConfirmedPowerStatus));
     network.submit();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::UNKNOWN),
+                          static_cast<int>(coreLamp->lastConfirmedPower));
     const Message original = network.wifiUart.sent[0].message;
     network.pump();
     network.assertExecuted();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::ON),
+                          static_cast<int>(coreLamp->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::CONFIRMED),
+                          static_cast<int>(coreLamp->lastConfirmedPowerStatus));
     TEST_ASSERT_TRUE(findLamp(network.lampLamps, LAMP_LOCAL)->state.power);
     TEST_ASSERT_FALSE(findLamp(network.mainLamps, LAMP_LOCAL)->state.power);
     TEST_ASSERT_EQUAL_UINT32(1, Serial.powerExecutionCount);
@@ -418,12 +511,17 @@ void test_set_power_traverses_uart_main_lamp_and_execution_ack_returns() {
 
 void test_receipt_ack_is_non_terminal_and_does_not_postpone_retry() {
     Network network;
+    Device* coreLamp = findDeviceById(network.registry, network.lampId);
     network.dropMainToLamp = 1;
     network.submit();
     network.pump();
     TEST_ASSERT_TRUE(network.pending()->accepted);
     TEST_ASSERT_TRUE(network.pending()->waitingForAck);
     TEST_ASSERT_FALSE(network.pending()->completed);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::UNKNOWN),
+                          static_cast<int>(coreLamp->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::UNKNOWN),
+                          static_cast<int>(coreLamp->lastConfirmedPowerStatus));
     TEST_ASSERT_EQUAL_UINT32(1000, network.pending()->sentAt);
     TEST_ASSERT_EQUAL_UINT32(0, Serial.powerExecutionCount);
     fakeNow += MESSAGE_TIMEOUT - 1;
@@ -433,6 +531,10 @@ void test_receipt_ack_is_non_terminal_and_does_not_postpone_retry() {
     network.core.poll();
     network.pump();
     network.assertExecuted();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::ON),
+                          static_cast<int>(coreLamp->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::CONFIRMED),
+                          static_cast<int>(coreLamp->lastConfirmedPowerStatus));
     TEST_ASSERT_EQUAL_UINT8(1, network.pending()->retryCount);
 }
 
@@ -589,7 +691,219 @@ void test_distinct_message_ids_execute_on_and_off_independently() {
     network.pump();
     network.assertExecuted(FIRST_COMMAND + 1);
     TEST_ASSERT_FALSE(findLamp(network.lampLamps, LAMP_LOCAL)->state.power);
+    const Device* coreLamp = findDeviceById(network.registry, network.lampId);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::OFF),
+                          static_cast<int>(coreLamp->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::CONFIRMED),
+                          static_cast<int>(coreLamp->lastConfirmedPowerStatus));
     TEST_ASSERT_EQUAL_UINT32(2, Serial.powerExecutionCount);
+}
+
+void test_two_lamp_confirmed_power_states_are_independent() {
+    Network network(LAMP_LOCAL, true, true);
+    Device* first = findDeviceById(network.registry, network.lampId);
+    Device* second = findDeviceById(network.registry, network.secondLampId);
+    TEST_ASSERT_NOT_NULL(first);
+    TEST_ASSERT_NOT_NULL(second);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::UNKNOWN),
+                          static_cast<int>(first->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::UNKNOWN),
+                          static_cast<int>(second->lastConfirmedPower));
+
+    network.submitTo(network.lampId, true, FIRST_COMMAND + 100);
+    network.submitTo(network.secondLampId, false, FIRST_COMMAND + 101);
+    network.pump();
+
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::ON),
+                          static_cast<int>(first->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::CONFIRMED),
+                          static_cast<int>(first->lastConfirmedPowerStatus));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::OFF),
+                          static_cast<int>(second->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::CONFIRMED),
+                          static_cast<int>(second->lastConfirmedPowerStatus));
+}
+
+void test_expired_power_command_preserves_old_value_as_stale() {
+    Network network;
+    network.submit(true, FIRST_COMMAND + 300);
+    network.pump();
+    Device* lamp = findDeviceById(network.registry, network.lampId);
+    TEST_ASSERT_NOT_NULL(lamp);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::ON),
+                          static_cast<int>(lamp->lastConfirmedPower));
+
+    const uint32_t expiredId = FIRST_COMMAND + 301;
+    network.dropAllFinalReplies = true;
+    network.submit(false, expiredId);
+    network.pump();
+    for (unsigned retry = 0; retry < MAX_MESSAGE_RETRIES + 1; ++retry) {
+        network.retry();
+    }
+    TEST_ASSERT_TRUE(network.pending(expiredId)->timedOut);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::ON),
+                          static_cast<int>(lamp->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::STALE),
+                          static_cast<int>(lamp->lastConfirmedPowerStatus));
+    TEST_ASSERT_TRUE(lamp->powerExecutionUnknown);
+
+    Message lateAck = {};
+    bool foundLateAck = false;
+    for (const Envelope& envelope : network.mainRadio.sent) {
+        if (envelope.message.type == MessageType::ACK &&
+            static_cast<uint32_t>(envelope.message.value2) == expiredId &&
+            envelope.message.executionStatus == ExecutionStatus::EXECUTED) {
+            lateAck = envelope.message;
+            foundLateAck = true;
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE(foundLateAck);
+    network.dropAllFinalReplies = false;
+    network.deliverReply(lateAck);
+    TEST_ASSERT_TRUE(network.pending(expiredId)->timedOut);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::ON),
+                          static_cast<int>(lamp->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::STALE),
+                          static_cast<int>(lamp->lastConfirmedPowerStatus));
+}
+
+void test_overlapping_same_lamp_commands_keep_history_stale_on_reordered_acks() {
+    Network network;
+    network.submit(true, FIRST_COMMAND + 200);
+    network.pump();
+    Device* lamp = findDeviceById(network.registry, network.lampId);
+    TEST_ASSERT_NOT_NULL(lamp);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::ON),
+                          static_cast<int>(lamp->lastConfirmedPower));
+
+    const uint32_t olderId = FIRST_COMMAND + 201;
+    const uint32_t newerId = FIRST_COMMAND + 202;
+    network.submit(false, olderId);
+    network.submit(true, newerId);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::ON),
+                          static_cast<int>(lamp->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::STALE),
+                          static_cast<int>(lamp->lastConfirmedPowerStatus));
+
+    network.dropAllFinalReplies = true;
+    network.pump();
+    TEST_ASSERT_EQUAL_UINT32(3, Serial.powerExecutionCount);
+    Message olderAck = {};
+    Message newerAck = {};
+    bool foundOlder = false;
+    bool foundNewer = false;
+    for (const Envelope& envelope : network.mainRadio.sent) {
+        const Message& reply = envelope.message;
+        if (reply.type != MessageType::ACK ||
+            reply.executionStatus != ExecutionStatus::EXECUTED) continue;
+        const uint32_t id = static_cast<uint32_t>(reply.value2);
+        if (id == olderId) { olderAck = reply; foundOlder = true; }
+        if (id == newerId) { newerAck = reply; foundNewer = true; }
+    }
+    TEST_ASSERT_TRUE(foundOlder);
+    TEST_ASSERT_TRUE(foundNewer);
+
+    network.dropAllFinalReplies = false;
+    network.deliverReply(newerAck);
+    network.deliverReply(olderAck);
+    network.assertExecuted(newerId);
+    network.assertExecuted(olderId);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::ON),
+                          static_cast<int>(lamp->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::STALE),
+                          static_cast<int>(lamp->lastConfirmedPowerStatus));
+
+    network.submit(false, FIRST_COMMAND + 203);
+    network.pump();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::OFF),
+                          static_cast<int>(lamp->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::CONFIRMED),
+                          static_cast<int>(lamp->lastConfirmedPowerStatus));
+}
+
+void test_two_lamps_route_power_and_correlate_retries_independently() {
+    Network network(LAMP_LOCAL, true, true);
+    TEST_ASSERT_NOT_EQUAL(network.lampLocal, network.secondLampLocal);
+    TEST_ASSERT_NOT_EQUAL(network.lampId, network.secondLampId);
+    TEST_ASSERT_EQUAL_UINT8(2, network.mainLamps.count);
+
+    const Device* first = findDeviceById(network.registry, network.lampId);
+    const Device* second = findDeviceById(network.registry, network.secondLampId);
+    TEST_ASSERT_NOT_NULL(first);
+    TEST_ASSERT_NOT_NULL(second);
+    TEST_ASSERT_EQUAL_UINT32(network.mainId, first->parentId);
+    TEST_ASSERT_EQUAL_UINT32(network.mainId, second->parentId);
+    TEST_ASSERT_EQUAL_UINT32(network.lampLocal, first->localId);
+    TEST_ASSERT_EQUAL_UINT32(network.secondLampLocal, second->localId);
+
+    Lamp* firstMainLamp = findLamp(network.mainLamps, network.lampLocal);
+    Lamp* secondMainLamp = findLamp(network.mainLamps, network.secondLampLocal);
+    TEST_ASSERT_NOT_NULL(firstMainLamp);
+    TEST_ASSERT_NOT_NULL(secondMainLamp);
+    TEST_ASSERT_EQUAL_UINT32(MAIN_LOCAL, firstMainLamp->identity.parentMainId);
+    TEST_ASSERT_EQUAL_UINT32(MAIN_LOCAL, secondMainLamp->identity.parentMainId);
+
+    network.submitTo(network.lampId, true, FIRST_COMMAND);
+    network.submitTo(network.secondLampId, false, SECOND_COMMAND);
+    network.dropAllFinalReplies = true;
+    network.pump(true); // Lose A's lamp ACK; hold both final ACKs for correlation checks.
+
+    TEST_ASSERT_TRUE(findLamp(network.lampLamps, network.lampLocal)->state.power);
+    TEST_ASSERT_FALSE(findLamp(network.secondLampLamps,
+                               network.secondLampLocal)->state.power);
+    TEST_ASSERT_EQUAL_UINT32(2, Serial.powerExecutionCount);
+    TEST_ASSERT_TRUE(network.pending(FIRST_COMMAND)->accepted);
+    TEST_ASSERT_TRUE(network.pending(SECOND_COMMAND)->accepted);
+    TEST_ASSERT_FALSE(network.pending(FIRST_COMMAND)->completed);
+    TEST_ASSERT_FALSE(network.pending(SECOND_COMMAND)->completed);
+
+    const Message commandA = network.wifiUart.sent[0].message;
+    const Message commandB = network.wifiUart.sent[1].message;
+    TEST_ASSERT_EQUAL_UINT32(network.lampId, commandA.destinationId);
+    TEST_ASSERT_EQUAL_UINT32(network.lampLocal, commandA.provisioningDeviceId);
+    TEST_ASSERT_EQUAL_UINT32(network.secondLampId, commandB.destinationId);
+    TEST_ASSERT_EQUAL_UINT32(network.secondLampLocal,
+                             commandB.provisioningDeviceId);
+
+    // A's authentic source cannot complete B's pending command, even if the
+    // forged reply carries B's command ID.
+    Message crossLampAck = makeCoreCommandAck(commandA, network.lampId,
+                                               ExecutionStatus::EXECUTED);
+    crossLampAck.value2 = static_cast<int32_t>(SECOND_COMMAND);
+    network.dropAllFinalReplies = false;
+    network.deliverReply(crossLampAck);
+    TEST_ASSERT_EQUAL_UINT(1, network.rejectedReplies);
+    TEST_ASSERT_FALSE(network.pending(FIRST_COMMAND)->completed);
+    TEST_ASSERT_FALSE(network.pending(SECOND_COMMAND)->completed);
+
+    Message lampBAck = {};
+    bool foundLampBAck = false;
+    for (const Envelope& envelope : network.mainRadio.sent) {
+        if (envelope.message.type == MessageType::ACK &&
+            static_cast<uint32_t>(envelope.message.value2) == SECOND_COMMAND &&
+            envelope.message.executionStatus == ExecutionStatus::EXECUTED) {
+            lampBAck = envelope.message;
+            foundLampBAck = true;
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE(foundLampBAck);
+    network.deliverReply(lampBAck);
+    network.assertExecuted(SECOND_COMMAND);
+    TEST_ASSERT_FALSE(network.pending(FIRST_COMMAND)->completed);
+
+    const size_t lampBSentBeforeRetry = network.secondLampRadio.sent.size();
+    network.retry();
+    network.assertExecuted(FIRST_COMMAND);
+    network.assertExecuted(SECOND_COMMAND);
+    TEST_ASSERT_EQUAL_UINT32(2, Serial.powerExecutionCount);
+    TEST_ASSERT_EQUAL_UINT(lampBSentBeforeRetry,
+                           network.secondLampRadio.sent.size());
+    TEST_ASSERT_TRUE(findLamp(network.lampLamps,
+                              network.lampLocal)->state.power);
+    TEST_ASSERT_FALSE(findLamp(network.secondLampLamps,
+                               network.secondLampLocal)->state.power);
 }
 
 void test_core_refuses_offline_lamp_or_main_without_transmitting() {
@@ -625,6 +939,9 @@ void test_lamp_offline_returns_failure_after_main_acceptance() {
     network.pump();
     network.assertFailure(CoreCommandError::OFFLINE);
     TEST_ASSERT_TRUE(network.pending()->accepted);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::UNKNOWN),
+        static_cast<int>(findDeviceById(network.registry,
+                                        network.lampId)->lastConfirmedPower));
     TEST_ASSERT_EQUAL_UINT32(0, Serial.powerExecutionCount);
 }
 
@@ -689,8 +1006,14 @@ void test_wrong_ack_provenance_target_correlation_and_result_are_ignored() {
     TEST_ASSERT_TRUE(network.pending()->waitingForAck);
     TEST_ASSERT_FALSE(network.pending()->completed);
     TEST_ASSERT_EQUAL_UINT(5, network.rejectedReplies);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::UNKNOWN),
+                          static_cast<int>(findDeviceById(
+                              network.registry, network.lampId)->lastConfirmedPower));
     network.pump();
     network.assertExecuted();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::ON),
+                          static_cast<int>(findDeviceById(
+                              network.registry, network.lampId)->lastConfirmedPower));
 }
 
 void test_partial_ack_cannot_complete_indivisible_power_command() {
@@ -975,6 +1298,10 @@ int main(int, char**) {
     RUN_TEST(test_lost_uart_execution_ack_retries_entire_path_with_same_identity);
     RUN_TEST(test_duplicate_message_id_rejects_resubmit_and_wire_replay_never_reexecutes);
     RUN_TEST(test_distinct_message_ids_execute_on_and_off_independently);
+    RUN_TEST(test_two_lamp_confirmed_power_states_are_independent);
+    RUN_TEST(test_expired_power_command_preserves_old_value_as_stale);
+    RUN_TEST(test_overlapping_same_lamp_commands_keep_history_stale_on_reordered_acks);
+    RUN_TEST(test_two_lamps_route_power_and_correlate_retries_independently);
     RUN_TEST(test_core_refuses_offline_lamp_or_main_without_transmitting);
     RUN_TEST(test_main_offline_lamp_returns_failure_without_receipt_or_execution);
     RUN_TEST(test_lamp_offline_returns_failure_after_main_acceptance);

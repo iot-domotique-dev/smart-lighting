@@ -47,6 +47,7 @@ static void expireDeviceIfNeeded(
         return;
     }
 
+    markLastConfirmedPowerStale(device);
     device.status = DeviceStatus::OFFLINE;
     publishDeviceStatusEvent(
         eventBus,

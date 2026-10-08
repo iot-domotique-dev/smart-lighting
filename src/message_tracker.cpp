@@ -61,6 +61,8 @@ void initMessageTracker(
         tracker.messages[i].timedOut =
             false;
 
+        tracker.messages[i].executionOrderAmbiguous = false;
+
         tracker.messages[i].retryCount =
             0;
 
@@ -143,6 +145,8 @@ bool trackMessage(
 
     pending.timedOut =
         false;
+
+    pending.executionOrderAmbiguous = false;
 
     pending.retryCount =
         0;

@@ -215,6 +215,10 @@ void test_generic_status_manager_updates_all_roles_and_events() {
     TEST_ASSERT_TRUE(registerDevice(
         registry, makeDevice(3, "LAMP_C6_001", DeviceRole::LAMP)
     ));
+    Device* lamp = findDeviceById(registry, 3);
+    TEST_ASSERT_NOT_NULL(lamp);
+    lamp->lastConfirmedPower = LastConfirmedPower::ON;
+    lamp->lastConfirmedPowerStatus = LastConfirmedPowerStatus::CONFIRMED;
 
     fakeNow = DEVICE_TIMEOUT + 1;
     updateDeviceStatus(registry, &events);
@@ -231,6 +235,10 @@ void test_generic_status_manager_updates_all_roles_and_events() {
         static_cast<int>(DeviceStatus::OFFLINE),
         static_cast<int>(findDeviceById(registry, 3)->status)
     );
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::ON),
+                          static_cast<int>(lamp->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::STALE),
+                          static_cast<int>(lamp->lastConfirmedPowerStatus));
 
     Event event = {};
     TEST_ASSERT_TRUE(consumeEvent(events, event));
@@ -248,6 +256,11 @@ void test_generic_status_manager_updates_all_roles_and_events() {
         static_cast<int>(DeviceStatus::ONLINE),
         static_cast<int>(findDeviceById(registry, 2)->status)
     );
+    updateDeviceSeen(*lamp, &events);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DeviceStatus::ONLINE),
+                          static_cast<int>(lamp->status));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::STALE),
+                          static_cast<int>(lamp->lastConfirmedPowerStatus));
     TEST_ASSERT_TRUE(consumeEvent(events, event));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(EventType::DEVICE_ONLINE),
                           static_cast<int>(event.type));
@@ -273,6 +286,32 @@ void test_registry_capacity_and_duplicate_ids_are_enforced() {
     TEST_ASSERT_EQUAL_UINT8(MAX_DEVICES, registry.count);
 }
 
+void test_registry_reinitialization_discards_confirmed_power_history() {
+    DeviceRegistry registry;
+    initDeviceRegistry(registry);
+    Device lamp = makeDevice(3, "LAMP_C6", DeviceRole::LAMP,
+                             DeviceStatus::ONLINE, 2, DEVICE_CAP_POWER);
+    lamp.localId = 17;
+    TEST_ASSERT_TRUE(registerDevice(registry, lamp));
+    Device* stored = findDeviceById(registry, lamp.id);
+    stored->lastConfirmedPower = LastConfirmedPower::ON;
+    stored->lastConfirmedPowerStatus = LastConfirmedPowerStatus::CONFIRMED;
+    stored->powerExecutionUnknown = true;
+
+    // CORE startup calls initDeviceRegistry; rediscovery must start unknown.
+    initDeviceRegistry(registry);
+    lamp = makeDevice(3, "LAMP_C6", DeviceRole::LAMP,
+                      DeviceStatus::ONLINE, 2, DEVICE_CAP_POWER);
+    lamp.localId = 17;
+    TEST_ASSERT_TRUE(registerDevice(registry, lamp));
+    stored = findDeviceById(registry, lamp.id);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::UNKNOWN),
+                          static_cast<int>(stored->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::UNKNOWN),
+                          static_cast<int>(stored->lastConfirmedPowerStatus));
+    TEST_ASSERT_FALSE(stored->powerExecutionUnknown);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_registry_starts_empty_and_exposes_list);
@@ -283,5 +322,6 @@ int main(int, char**) {
     RUN_TEST(test_capabilities_cover_lighting_and_future_security_modules);
     RUN_TEST(test_generic_status_manager_updates_all_roles_and_events);
     RUN_TEST(test_registry_capacity_and_duplicate_ids_are_enforced);
+    RUN_TEST(test_registry_reinitialization_discards_confirmed_power_history);
     return UNITY_END();
 }

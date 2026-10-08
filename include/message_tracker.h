@@ -25,6 +25,9 @@ struct PendingMessage {
 
     bool timedOut;
 
+    // Local-only marker: distinct same-lamp requests overlapped in flight.
+    bool executionOrderAmbiguous;
+
     uint8_t retryCount;
 
     uint32_t sentAt;
