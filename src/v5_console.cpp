@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 #include "roles.h"
 #include "v5_provisioning_runtime.h"
+#include "core_command_protocol.h"
 
 namespace {
 void executeLine(char* line) {
@@ -22,6 +23,18 @@ void executeLine(char* line) {
     if (strcmp(command, "help") == 0) {
         Serial.println("[CONSOLE] pair <hardwareId> <name>");
         Serial.println("[CONSOLE] power <deviceId> on|off");
+        if (DEVICE_ROLE == DeviceRole::LAMP)
+            Serial.println("[CONSOLE] drop_ack (diagnostic: lose next V7.2 execution ACK)");
+        return;
+    }
+
+    if (strcmp(command, "drop_ack") == 0 && DEVICE_ROLE == DeviceRole::LAMP) {
+        if (strtok(nullptr, " \t\r\n") != nullptr) {
+            Serial.println("[CONSOLE] usage: drop_ack");
+            return;
+        }
+        requestDropNextCoreExecutionAck();
+        Serial.println("[CONSOLE] next V7.2 execution ACK will be intentionally lost");
         return;
     }
 

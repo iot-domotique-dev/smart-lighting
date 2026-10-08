@@ -1,8 +1,10 @@
 #pragma once
 
 #include "core_api_service.h"
+#include "core_command_service.h"
 #include "core_uart_transport.h"
 #include "device_registry.h"
+#include "message_tracker.h"
 #include "wifi_transport.h"
 
 #include "freertos/FreeRTOS.h"
@@ -18,6 +20,9 @@ private:
     DeviceRegistry& registry;
     WiFiTransport& wifi;
     CoreUartTransport& uart;
+    CoreCommandService& commands;
+    MessageTracker& tracker;
+    const char* apiToken;
     SemaphoreHandle_t* registryMutex;
     bool started;
 #if defined(SMART_LIGHTING_CORE_WIFI)
@@ -29,7 +34,10 @@ public:
     CoreHttpApi(DeviceRegistry& coreRegistry,
                 WiFiTransport& wifiTransport,
                 CoreUartTransport& uartTransport,
-                SemaphoreHandle_t& coreRegistryMutex);
+                SemaphoreHandle_t& coreRegistryMutex,
+                CoreCommandService& commandService,
+                MessageTracker& messageTracker,
+                const char* commandApiToken);
 
     bool begin();
     bool isReady() const;

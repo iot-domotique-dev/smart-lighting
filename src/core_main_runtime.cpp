@@ -13,13 +13,15 @@ constexpr uint32_t ANNOUNCEMENT_BACKOFF_MS = 1000;
 constexpr char MAIN_NAME[] = "MAIN_LIGHTING";
 }
 
-CoreMainRuntime::CoreMainRuntime(Communication& zigbeeCommunication)
-    : zigbee(zigbeeCommunication), localId(0), assignedCoreId(0),
+CoreMainRuntime::CoreMainRuntime(Communication& zigbeeCommunication, LampRegistry& lamps)
+    : zigbee(zigbeeCommunication), commandRelay(zigbeeCommunication, lamps),
+      localId(0), assignedCoreId(0),
       nextAnnouncementAt(0) {}
 
 bool CoreMainRuntime::begin(uint32_t mainLocalId) {
     if (mainLocalId == 0) return false;
     localId = mainLocalId;
+    commandRelay.setMain(localId, 0);
     registerApplicationMessageHandler(handleZigbeeMessage, this);
     return true;
 }
@@ -58,6 +60,7 @@ bool CoreMainRuntime::handleZigbeeMessage(
 }
 
 bool CoreMainRuntime::dispatch(const Message& message) {
+    if (commandRelay.handleMessage(message)) return true;
     if (message.type != MessageType::STATE ||
         message.commandType != CORE_TOPOLOGY_ID_ASSIGNED) {
         return false;
@@ -74,6 +77,7 @@ bool CoreMainRuntime::dispatch(const Message& message) {
          resultCode == static_cast<uint8_t>(CoreModuleUpdateResult::UPDATED));
     if (accepted) {
         assignedCoreId = coreId;
+        commandRelay.setMain(localId, assignedCoreId);
         Message acknowledgement = {};
         if (makeCoreIdAckMessage(localId, assignedCoreId, true, acknowledgement)) {
             acknowledgement.id = generateMessageId();
@@ -84,6 +88,7 @@ bool CoreMainRuntime::dispatch(const Message& message) {
         Serial.println(static_cast<unsigned long>(assignedCoreId));
     } else {
         assignedCoreId = 0;
+        commandRelay.setMain(localId, 0);
         Serial.print("[V7] CORE rejected MAIN identity, result=");
         Serial.println(static_cast<unsigned>(resultCode));
     }

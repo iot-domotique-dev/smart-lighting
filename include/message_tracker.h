@@ -18,6 +18,9 @@ struct PendingMessage {
 
     bool waitingForAck;
 
+    // MAIN receipt is separate from the final LAMP execution result.
+    bool accepted;
+
     bool completed;
 
     bool timedOut;
@@ -25,6 +28,8 @@ struct PendingMessage {
     uint8_t retryCount;
 
     uint32_t sentAt;
+
+    uint32_t firstSentAt;
 
     uint32_t completedAt;
 };

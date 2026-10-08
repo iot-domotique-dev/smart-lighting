@@ -116,10 +116,12 @@ ExecutionStatus executeAction(
 
                 case ActionType::SET_LAMP_POWER:
 
-                    setLampPower(
+                    if (!setLampPower(
                         *lamp,
                         action.value != 0
-                    );
+                    )) {
+                        return ExecutionStatus::FAILED;
+                    }
 
                     break;
 

@@ -5,6 +5,9 @@
 #include "core_link_service.h"
 #include "core_module_service.h"
 #include "device_manager.h"
+#include "core_console.h"
+#include "message_id_generator.h"
+#include "esp_random.h"
 
 #if __has_include("wifi_credentials.h")
 #include "wifi_credentials.h"
@@ -13,9 +16,17 @@
 #define SMART_LIGHTING_WIFI_PASSWORD ""
 #endif
 
-CoreWifiRuntime::CoreWifiRuntime(DeviceRegistry& coreRegistry)
-    : registry(coreRegistry), uart(), wifi(), registryMutex(nullptr),
-      api(coreRegistry, wifi, uart, registryMutex), uartReady(false) {}
+#ifndef SMART_LIGHTING_API_TOKEN
+#define SMART_LIGHTING_API_TOKEN ""
+#endif
+
+CoreWifiRuntime::CoreWifiRuntime(DeviceRegistry& coreRegistry, MessageTracker& messages)
+    : registry(coreRegistry), uart(), commandUart(uart),
+      commandLink{CommunicationTransportType::CORE_UART, CommunicationState::READY,
+                  CORE_LOGICAL_ID, &commandUart}, tracker(messages),
+      commands(coreRegistry, messages, commandLink), wifi(), registryMutex(nullptr),
+      api(coreRegistry, wifi, uart, registryMutex, commands, messages,
+          SMART_LIGHTING_API_TOKEN), uartReady(false) {}
 
 bool CoreWifiRuntime::begin() {
     if (registryMutex == nullptr) registryMutex = xSemaphoreCreateMutex();
@@ -34,6 +45,8 @@ bool CoreWifiRuntime::begin() {
         }
     }
     uartReady = uart.begin();
+    seedMessageIds(esp_random());
+    if (!startCoreConsole()) Serial.println("[CORE-WIFI] command console unavailable");
     const bool apiStarted = api.begin();
     Serial.print("[CORE-WIFI] Wi-Fi adapter: ");
     Serial.println(wifiStarted ? "ready" : "error");
@@ -48,10 +61,75 @@ bool CoreWifiRuntime::begin() {
 
 void CoreWifiRuntime::poll() {
     wifi.poll();
-    if (!uartReady) return;
-    CoreLinkPacket packet = {};
-    while (uart.receive(packet)) {
-        handlePacket(packet);
+    if (uartReady) {
+        CoreLinkPacket packet = {};
+        while (uart.receive(packet)) {
+            handlePacket(packet);
+        }
+    }
+    pollConsole();
+    if (registryMutex != nullptr &&
+        xSemaphoreTake(registryMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        commands.poll();
+        (void)xSemaphoreGive(registryMutex);
+    }
+}
+
+void CoreWifiRuntime::printCommandState(uint32_t id) {
+    PendingMessage snapshot = {};
+    bool found = false;
+    if (registryMutex != nullptr &&
+        xSemaphoreTake(registryMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        const PendingMessage* pending = findPendingMessage(tracker, id);
+        if (pending != nullptr) {
+            snapshot = *pending;
+            found = true;
+        }
+        (void)xSemaphoreGive(registryMutex);
+    }
+    if (!found) {
+        Serial.println("[CORE-COMMAND] unknown or evicted message id");
+        return;
+    }
+    const PendingMessage* pending = &snapshot;
+    Serial.print("[CORE-COMMAND] id=");
+    Serial.print(static_cast<unsigned long>(id));
+    Serial.print(" state=");
+    if (pending->timedOut) Serial.print("expired (execution unknown)");
+    else if (pending->completed && pending->message.executionStatus == ExecutionStatus::EXECUTED)
+        Serial.print("executed");
+    else if (pending->completed) Serial.print("failed");
+    else if (pending->accepted) Serial.print("accepted (waiting execution)");
+    else Serial.print("sent (waiting acceptance/execution)");
+    Serial.print(" retries=");
+    Serial.println(static_cast<unsigned>(pending->retryCount));
+    if (pending->completed && !pending->timedOut &&
+        pending->message.executionStatus == ExecutionStatus::FAILED) {
+        Serial.print("[CORE-COMMAND] error=");
+        if (pending->message.value2 == static_cast<int32_t>(ExecutionStatus::FAILED))
+            Serial.println("execution_failed");
+        else Serial.println(coreCommandErrorName(
+            static_cast<CoreCommandError>(pending->message.value2)));
+    }
+}
+
+void CoreWifiRuntime::pollConsole() {
+    CoreConsoleRequest request = {};
+    while (receiveCoreConsoleRequest(request)) {
+        if (request.query) { printCommandState(request.id); continue; }
+        if (registryMutex == nullptr ||
+            xSemaphoreTake(registryMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+            Serial.println("[CORE-COMMAND] refused: registry busy");
+            continue;
+        }
+        uint32_t id = 0;
+        const CoreCommandError result = commands.submitPower(request.id, request.power, id);
+        (void)xSemaphoreGive(registryMutex);
+        if (result != CoreCommandError::NONE) {
+            Serial.print("[CORE-COMMAND] refused: ");
+            Serial.println(coreCommandErrorName(result));
+        }
+        if (id != 0) printCommandState(id);
     }
 }
 
@@ -67,6 +145,18 @@ void CoreWifiRuntime::refreshRegistryStatus(EventBus& eventBus) {
 }
 
 void CoreWifiRuntime::handlePacket(const CoreLinkPacket& packet) {
+    if (packet.type == CoreLinkMessageType::COMMAND_RESULT) {
+        bool handled = false;
+        if (registryMutex != nullptr &&
+            xSemaphoreTake(registryMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            handled = commands.handleReply(packet.message);
+            (void)xSemaphoreGive(registryMutex);
+        }
+        if (handled)
+            printCommandState(static_cast<uint32_t>(packet.message.value2));
+        else Serial.println("[CORE-COMMAND] unexpected, late ACK, or busy tracker ignored");
+        return;
+    }
     if (packet.type == CoreLinkMessageType::MODULE_ANNOUNCEMENT) {
         CoreLinkPacket response = {};
         if (registryMutex == nullptr ||

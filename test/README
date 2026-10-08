@@ -8,6 +8,8 @@ pio test -e native
 
 Le compilateur C/C++ hôte doit être disponible pour l’environnement PlatformIO. La suite utilise Unity et un faux Arduino.h pour les composants qui en ont besoin.
 
+Référence avant correction du cache de routage, exécutée le 7 octobre 2026 : **80 tests réussis sur 80**, dont les 52 existants et 28 tests de commandes V7.2. Ces résultats ne valident pas le trajet physique V7.2. Un essai matériel a ensuite révélé une collision entre CORE logique `1` et lampe locale V5 `1`, avec acceptation MAIN puis expiration au CORE. Après correction, la suite complète réussit **85 tests sur 85**, dont les 52 existants et 33 tests V7.2.
+
 ## Couverture par dossier
 
 - test_device_registry : registre et identités d’appareils.
@@ -16,5 +18,8 @@ Le compilateur C/C++ hôte doit être disponible pour l’environnement Platform
 - test_zigbee_message_codec : sérialisation des messages V5 transportés par Zigbee.
 - test_core_link : codec UART et règles d’annonces, d’attribution d’ID et d’identité V7.
 - test_core_api : réponses JSON, routes, erreurs HTTP et consultation du registre.
+- test_v7_commands : services CORE/bridge/MAIN et routeur LAMP, codecs UART/Zigbee réels, pertes de commandes et d’ACK, IDs 32 bits, retries, déduplication, saturation, offline, erreurs et expiration.
 
-Les tests natifs vérifient la logique et la sérialisation. Ils ne remplacent pas les essais radio Zigbee, UART physique, Wi-Fi ou HTTP sur carte. L’état des essais matériels est suivi dans [la documentation V5](../docs/V5_ZIGBEE.md), [le CORE double C6](../docs/V7_CORE_DOUBLE_C6.md) et [l’API](../docs/V7_1_CORE_API.md).
+La correction du routage distingue `CommunicationRouteScope::CORE` de `CommunicationRouteScope::LOCAL_DEVICE`. La régression utilise le même `ZigbeeRouteTable` portable que le transport de production et vérifie l’apprentissage des routes CORE `1` et appareil local `1` dans les deux ordres, les annonces d’attribution topologique, une destination CORE absente, le routage connu par `hardwareId` et une table pleine. Validation fonctionnelle V7.2 confirmée sur cartes : ON avec ACK final, perte d’ACK avec une seule exécution, OFF et refus offline/inconnu rapportés fonctionnels, expiration CORE après deux retries, puis reprise confirmée après reconnexion du lien UART. Détails et limites dans [la procédure V7.2](../docs/V7_2_COMMANDS.md).
+
+Les tests natifs vérifient la logique et la sérialisation. Ils ne remplacent pas les essais radio Zigbee, UART physique, Wi-Fi ou HTTP sur carte. L’état des essais matériels est suivi dans [la documentation V5](../docs/V5_ZIGBEE.md), [le CORE double C6](../docs/V7_CORE_DOUBLE_C6.md), [l’API](../docs/V7_1_CORE_API.md) et [les commandes V7.2](../docs/V7_2_COMMANDS.md).

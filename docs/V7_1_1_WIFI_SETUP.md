@@ -67,4 +67,4 @@ Lors de la validation complète du 7 octobre 2026, les collections ont retourné
 
 Si la connexion échoue, vérifier l’IP dans les logs série, puis lancer ipconfig sur le PC. Celui-ci doit pouvoir joindre la même plage réseau; un réseau Wi-Fi invité ou l’option d’isolation des clients du routeur peut empêcher la connexion.
 
-L’API est en HTTP local sans authentification. Ne pas rediriger le port 80 du routeur vers Internet.
+Les routes de lecture de l’API restent en HTTP local sans authentification; les routes V7.3 de commande exigent le Bearer token configuré dans `include/wifi_credentials.h`. Les échanges ne sont pas chiffrés. Ne pas rediriger le port 80 du routeur vers Internet. Voir la [configuration et les exemples V7.3](V7_3_HTTP_COMMANDS.md).

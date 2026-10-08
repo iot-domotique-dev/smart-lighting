@@ -3,6 +3,45 @@
 #include "message_deduplicator.h"
 #include "message_manager.h"
 
+namespace {
+ProcessedMessage* allocateResultSlot(MessageDeduplicator& deduplicator,
+                                     uint32_t now) {
+    if (deduplicator.count < MAX_PROCESSED_MESSAGES) {
+        return &deduplicator.messages[deduplicator.count++];
+    }
+    for (uint8_t offset = 0; offset < MAX_PROCESSED_MESSAGES; ++offset) {
+        const uint8_t index = static_cast<uint8_t>(
+            (deduplicator.nextIndex + offset) % MAX_PROCESSED_MESSAGES);
+        ProcessedMessage& entry = deduplicator.messages[index];
+        if (entry.valid && entry.protectedUntil != 0 &&
+            static_cast<int32_t>(now - entry.protectedUntil) < 0) {
+            continue;
+        }
+        deduplicator.nextIndex = static_cast<uint8_t>(
+            (index + 1) % MAX_PROCESSED_MESSAGES);
+        return &entry;
+    }
+    return nullptr;
+}
+
+void populateResult(ProcessedMessage& entry, uint32_t sourceId,
+                    uint32_t messageId, ExecutionStatus executionStatus,
+                    uint32_t now, uint32_t protectedUntil) {
+    entry.sourceId = sourceId;
+    entry.messageId = messageId;
+    entry.executionStatus = executionStatus;
+    entry.processedAt = now;
+    entry.protectedUntil = protectedUntil;
+    entry.destinationId = 0;
+    entry.parentMainId = 0;
+    entry.provisioningDeviceId = 0;
+    entry.commandType = 0;
+    entry.value = 0;
+    entry.hasCommandIdentity = false;
+    entry.valid = true;
+}
+}  // namespace
+
 void initMessageDeduplicator(
     MessageDeduplicator& deduplicator
 ) {
@@ -21,6 +60,13 @@ void initMessageDeduplicator(
             ExecutionStatus::NOT_EXECUTED;
 
         deduplicator.messages[i].processedAt = 0;
+        deduplicator.messages[i].protectedUntil = 0;
+        deduplicator.messages[i].destinationId = 0;
+        deduplicator.messages[i].parentMainId = 0;
+        deduplicator.messages[i].provisioningDeviceId = 0;
+        deduplicator.messages[i].commandType = 0;
+        deduplicator.messages[i].value = 0;
+        deduplicator.messages[i].hasCommandIdentity = false;
 
         deduplicator.messages[i].valid = false;
     }
@@ -90,67 +136,30 @@ bool registerProcessedMessage(
         return false;
     }
 
-    /*
-     * Si le tableau n'est pas encore plein,
-     * on ajoute simplement le message.
-     */
-    if (
-        deduplicator.count <
-        MAX_PROCESSED_MESSAGES
-    ) {
+    const uint32_t now = millis();
+    ProcessedMessage* entry = allocateResultSlot(deduplicator, now);
+    if (entry == nullptr) return false;
+    populateResult(*entry, sourceId, messageId, executionStatus, now, 0);
+    return true;
+}
 
-        ProcessedMessage& entry =
-            deduplicator.messages[
-                deduplicator.count
-            ];
-
-        entry.sourceId = sourceId;
-        entry.messageId = messageId;
-
-        entry.executionStatus =
-            executionStatus;
-
-        entry.processedAt =
-            millis();
-
-        entry.valid = true;
-
-        deduplicator.count++;
-
+bool reserveProcessedMessage(
+    MessageDeduplicator& deduplicator,
+    uint32_t sourceId,
+    uint32_t messageId,
+    uint32_t protectionMs
+) {
+    if (protectionMs == 0 || protectionMs > INT32_MAX) return false;
+    if (findProcessedMessage(deduplicator, sourceId, messageId) != nullptr) {
         return true;
     }
-
-    /*
-     * Tableau plein :
-     *
-     * on remplace l'entrée la plus ancienne
-     * selon le principe d'un buffer circulaire.
-     */
-    ProcessedMessage& entry =
-        deduplicator.messages[
-            deduplicator.nextIndex
-        ];
-
-    entry.sourceId = sourceId;
-    entry.messageId = messageId;
-
-    entry.executionStatus =
-        executionStatus;
-
-    entry.processedAt =
-        millis();
-
-    entry.valid = true;
-
-    deduplicator.nextIndex++;
-
-    if (
-        deduplicator.nextIndex >=
-        MAX_PROCESSED_MESSAGES
-    ) {
-        deduplicator.nextIndex = 0;
-    }
-
+    const uint32_t now = millis();
+    ProcessedMessage* entry = allocateResultSlot(deduplicator, now);
+    if (entry == nullptr) return false;
+    uint32_t deadline = now + protectionMs;
+    if (deadline == 0) deadline = 1;
+    populateResult(*entry, sourceId, messageId, ExecutionStatus::NOT_EXECUTED,
+                   now, deadline);
     return true;
 }
 

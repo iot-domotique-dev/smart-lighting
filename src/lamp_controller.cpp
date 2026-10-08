@@ -4,18 +4,22 @@
 #include "lamp_hardware.h"
 
 
-void setLampPower(
+bool setLampPower(
     Lamp& lamp,
     bool state
 ) {
 
+    if (!writeLampHardwarePower(state)) {
+        Serial.println("[LAMP] GPIO power write failed");
+        return false;
+    }
     lamp.state.power = state;
-    writeLampHardwarePower(state);
 
     Serial.print("Power -> ");
     Serial.println(
         state ? "ON" : "OFF"
     );
+    return true;
 }
 
 

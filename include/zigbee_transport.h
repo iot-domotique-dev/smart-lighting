@@ -10,12 +10,17 @@
 class ZigbeeTransport : public CommunicationTransportInterface {
 private:
     volatile bool started;
+    bool sendTo(const Message& message, uint32_t nextHopLogicalId,
+                CommunicationRouteScope scope);
 
 public:
     ZigbeeTransport();
 
     bool begin() override;
     bool send(const Message& message) override;
+    bool sendVia(const Message& message, uint32_t nextHopLogicalId,
+                CommunicationRouteScope scope =
+                    CommunicationRouteScope::LOCAL_DEVICE) override;
     bool receive(Message& message) override;
     bool isReady() const override;
     const char* name() const override;

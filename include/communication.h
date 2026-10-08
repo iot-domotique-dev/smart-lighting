@@ -9,7 +9,9 @@ enum class CommunicationTransportType {
 
     SIMULATION,
 
-    ZIGBEE
+    ZIGBEE,
+
+    CORE_UART
 };
 
 
@@ -53,6 +55,22 @@ bool sendMessage(
     Communication& communication,
     Message message
 );
+
+inline bool sendMessageVia(
+    Communication& communication,
+    Message message,
+    uint32_t nextHopLogicalId,
+    CommunicationRouteScope scope = CommunicationRouteScope::LOCAL_DEVICE
+) {
+    if (nextHopLogicalId == 0 || communication.transport == nullptr ||
+        communication.state != CommunicationState::READY ||
+        !communication.transport->isReady()) {
+        return false;
+    }
+    if (message.timestamp == 0) message.timestamp = millis();
+    message.status = MessageStatus::SENT;
+    return communication.transport->sendVia(message, nextHopLogicalId, scope);
+}
 
 
 /*

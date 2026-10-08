@@ -14,6 +14,18 @@ struct ProcessedMessage {
 
     uint32_t processedAt;
 
+    // Entries remain available for retries until this local deadline.
+    uint32_t protectedUntil;
+
+    // Bind a CORE result to its original payload, so ID reuse cannot claim
+    // execution of a different command.
+    uint32_t destinationId;
+    uint32_t parentMainId;
+    uint32_t provisioningDeviceId;
+    int32_t commandType;
+    int32_t value;
+    bool hasCommandIdentity;
+
     bool valid;
 };
 
@@ -45,6 +57,14 @@ bool registerProcessedMessage(
     uint32_t sourceId,
     uint32_t messageId,
     ExecutionStatus executionStatus
+);
+
+/* Reserve a result slot before executing. Fails if all slots are protected. */
+bool reserveProcessedMessage(
+    MessageDeduplicator& deduplicator,
+    uint32_t sourceId,
+    uint32_t messageId,
+    uint32_t protectionMs
 );
 
 void printMessageDeduplicator(

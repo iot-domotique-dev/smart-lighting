@@ -6,6 +6,9 @@ namespace {
 constexpr uint8_t MAGIC_0 = 0x53;
 constexpr uint8_t MAGIC_1 = 0x43;
 constexpr size_t FRAME_FIXED_SIZE = CORE_LINK_HEADER_SIZE + CORE_LINK_CRC_SIZE;
+constexpr size_t COMMAND_PAYLOAD_SIZE = 39;
+static_assert(COMMAND_PAYLOAD_SIZE <= CORE_LINK_MAX_PAYLOAD_SIZE,
+              "Command messages must fit the existing UART payload");
 
 void writeU16(uint8_t* output, size_t& offset, uint16_t value) {
     output[offset++] = static_cast<uint8_t>(value);
@@ -56,7 +59,76 @@ uint16_t crc16Ccitt(const uint8_t* data, size_t length) {
 
 bool isValidType(uint8_t value) {
     return value >= static_cast<uint8_t>(CoreLinkMessageType::HELLO) &&
-           value <= static_cast<uint8_t>(CoreLinkMessageType::ERROR);
+           value <= static_cast<uint8_t>(CoreLinkMessageType::COMMAND_RESULT);
+}
+
+bool isValidCommandMessage(const Message& message, CoreLinkMessageType type) {
+    const MessageType expected = type == CoreLinkMessageType::COMMAND
+        ? MessageType::COMMAND : MessageType::ACK;
+    return message.type == expected && message.id != 0 &&
+        message.sourceId != 0 && message.destinationId != 0 &&
+        static_cast<unsigned>(message.status) <=
+            static_cast<unsigned>(MessageStatus::FAILED) &&
+        static_cast<unsigned>(message.executionStatus) <=
+            static_cast<unsigned>(ExecutionStatus::FAILED) &&
+        (expected != MessageType::ACK || message.value2 != 0);
+}
+
+bool appendCommandMessage(
+    const Message& message,
+    CoreLinkMessageType type,
+    uint8_t* output,
+    size_t capacity,
+    size_t& offset
+) {
+    if (!isValidCommandMessage(message, type) ||
+        offset + COMMAND_PAYLOAD_SIZE > capacity) {
+        return false;
+    }
+    writeU32(output, offset, message.id);
+    writeU32(output, offset, message.sourceId);
+    writeU32(output, offset, message.destinationId);
+    writeU32(output, offset, message.timestamp);
+    writeU32(output, offset, static_cast<uint32_t>(message.commandType));
+    writeU32(output, offset, static_cast<uint32_t>(message.value));
+    writeU32(output, offset, static_cast<uint32_t>(message.value2));
+    writeU32(output, offset, message.parentMainId);
+    writeU32(output, offset, message.provisioningDeviceId);
+    output[offset++] = static_cast<uint8_t>(message.type);
+    output[offset++] = static_cast<uint8_t>(message.status);
+    output[offset++] = static_cast<uint8_t>(message.executionStatus);
+    return true;
+}
+
+bool readCommandMessage(
+    const uint8_t* input,
+    size_t length,
+    size_t& offset,
+    CoreLinkMessageType type,
+    Message& message
+) {
+    uint32_t commandType = 0;
+    uint32_t value = 0;
+    uint32_t value2 = 0;
+    if (!readU32(input, length, offset, message.id) ||
+        !readU32(input, length, offset, message.sourceId) ||
+        !readU32(input, length, offset, message.destinationId) ||
+        !readU32(input, length, offset, message.timestamp) ||
+        !readU32(input, length, offset, commandType) ||
+        !readU32(input, length, offset, value) ||
+        !readU32(input, length, offset, value2) ||
+        !readU32(input, length, offset, message.parentMainId) ||
+        !readU32(input, length, offset, message.provisioningDeviceId) ||
+        offset + 3 > length) {
+        return false;
+    }
+    message.commandType = static_cast<int32_t>(commandType);
+    message.value = static_cast<int32_t>(value);
+    message.value2 = static_cast<int32_t>(value2);
+    message.type = static_cast<MessageType>(input[offset++]);
+    message.status = static_cast<MessageStatus>(input[offset++]);
+    message.executionStatus = static_cast<ExecutionStatus>(input[offset++]);
+    return isValidCommandMessage(message, type);
 }
 
 bool appendName(const char* name, uint8_t* output, size_t capacity, size_t& offset) {
@@ -151,6 +223,14 @@ bool encodeCoreLinkFrame(
             if (offset + 5 > outputCapacity) return false;
             writeU32(output, offset, packet.localId);
             output[offset++] = packet.resultCode;
+            break;
+
+        case CoreLinkMessageType::COMMAND:
+        case CoreLinkMessageType::COMMAND_RESULT:
+            if (!appendCommandMessage(packet.message, packet.type, output,
+                                      outputCapacity, offset)) {
+                return false;
+            }
             break;
 
         default:
@@ -252,6 +332,12 @@ bool decodeCoreLinkFrame(
             validPayload = readU32(input, payloadEnd, offset, decoded.localId) &&
                            offset < payloadEnd;
             if (validPayload) decoded.resultCode = input[offset++];
+            break;
+
+        case CoreLinkMessageType::COMMAND:
+        case CoreLinkMessageType::COMMAND_RESULT:
+            validPayload = readCommandMessage(input, payloadEnd, offset,
+                                               decoded.type, decoded.message);
             break;
 
         default:

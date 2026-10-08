@@ -90,13 +90,13 @@ V5ProvisioningRuntime v5ProvisioningRuntime(
 );
 
 #if defined(SMART_LIGHTING_CORE_WIFI)
-CoreWifiRuntime coreWifiRuntime(coreDeviceRegistry);
+CoreWifiRuntime coreWifiRuntime(coreDeviceRegistry, messageTracker);
 #elif defined(SMART_LIGHTING_CORE_ZIGBEE)
 CoreZigbeeRuntime coreZigbeeRuntime(communication);
 #endif
 
 #if defined(SMART_LIGHTING_ZIGBEE) && defined(DEVICE_ROLE_MAIN)
-CoreMainRuntime coreMainRuntime(communication);
+CoreMainRuntime coreMainRuntime(communication, lampRegistry);
 #endif
 
 bool commissionLampV5(const char* hardwareId, const char* requestedName) {

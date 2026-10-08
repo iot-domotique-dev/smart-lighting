@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "message.h"
+
 constexpr uint8_t CORE_LINK_PROTOCOL_VERSION = 1;
 constexpr size_t CORE_LINK_MAX_NAME_LENGTH = 31;
 constexpr size_t CORE_LINK_MAX_PAYLOAD_SIZE = 46;
@@ -17,7 +19,9 @@ enum class CoreLinkMessageType : uint8_t {
     ID_ASSIGNMENT = 3,
     ACK = 4,
     STATE = 5,
-    ERROR = 6
+    ERROR = 6,
+    COMMAND = 7,
+    COMMAND_RESULT = 8
 };
 
 struct CoreLinkPacket {
@@ -32,6 +36,8 @@ struct CoreLinkPacket {
     uint8_t resultCode;
     uint8_t statusCode;
     char name[CORE_LINK_MAX_NAME_LENGTH + 1];
+    /* V7.2 uses the existing Message model inside the UART framing. */
+    Message message;
 };
 
 /* Encodes explicit fields into a versioned frame; never serializes the struct. */

@@ -7,11 +7,17 @@
 #include "message_router.h"
 
 CoreZigbeeRuntime::CoreZigbeeRuntime(Communication& zigbeeCommunication)
-    : zigbee(zigbeeCommunication), uart(), mainLocalId(0), mainCoreId(0),
+    : zigbee(zigbeeCommunication), uart(), commandTransport(uart),
+      commandLink{CommunicationTransportType::CORE_UART,
+                  CommunicationState::INITIALIZING, CORE_LOGICAL_ID,
+                  &commandTransport},
+      commandBridge(zigbee, commandLink), mainLocalId(0), mainCoreId(0),
       helloSequence(1), uartReady(false) {}
 
 bool CoreZigbeeRuntime::begin() {
     uartReady = uart.begin();
+    commandLink.state = commandTransport.begin()
+        ? CommunicationState::READY : CommunicationState::ERROR;
     registerApplicationMessageHandler(handleZigbeeMessage, this);
     if (uartReady) {
         CoreLinkPacket hello = {};
@@ -41,6 +47,10 @@ bool CoreZigbeeRuntime::handleZigbeeMessage(
 }
 
 bool CoreZigbeeRuntime::dispatchZigbeeMessage(const Message& message) {
+    if (message.type == MessageType::ACK &&
+        commandBridge.handleFromZigbee(message)) {
+        return true;
+    }
     if (message.type == MessageType::STATE &&
         message.commandType == CORE_TOPOLOGY_ID_ACK) {
         bool accepted = false;
@@ -71,6 +81,10 @@ bool CoreZigbeeRuntime::dispatchZigbeeMessage(const Message& message) {
 }
 
 void CoreZigbeeRuntime::handleUartPacket(const CoreLinkPacket& packet) {
+    if (packet.type == CoreLinkMessageType::COMMAND) {
+        (void)commandBridge.handleFromCore(packet.message);
+        return;
+    }
     if (packet.type == CoreLinkMessageType::ID_ASSIGNMENT ||
         packet.type == CoreLinkMessageType::ERROR) {
         if (packet.localId == 0 ||
@@ -91,6 +105,7 @@ void CoreZigbeeRuntime::handleUartPacket(const CoreLinkPacket& packet) {
             if (sendMessage(zigbee, response) && assigned) {
                 mainLocalId = packet.localId;
                 mainCoreId = coreId;
+                commandBridge.setMain(mainLocalId, mainCoreId);
                 CoreLinkPacket acknowledgement = {};
                 acknowledgement.sequence = packet.sequence;
                 acknowledgement.type = CoreLinkMessageType::ACK;

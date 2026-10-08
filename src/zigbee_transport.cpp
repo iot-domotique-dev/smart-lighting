@@ -1,6 +1,7 @@
 #include <Arduino.h>
 
 #include "zigbee_transport.h"
+#include "zigbee_route_table.h"
 
 #if defined(SMART_LIGHTING_ZIGBEE)
 
@@ -13,6 +14,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "core_command_protocol.h"
 #include "roles.h"
 #include "zigbee_message_codec.h"
 
@@ -22,76 +24,28 @@ constexpr uint8_t APP_ENDPOINT = 1;
 constexpr uint16_t APP_PROFILE_ID = 0x0104;  // Home Automation profile.
 constexpr uint16_t APP_CLUSTER_ID = 0xFC01;  // Manufacturer-specific cluster.
 constexpr uint16_t BROADCAST_RX_ON_WHEN_IDLE = 0xFFFD;
-constexpr uint8_t PEER_CAPACITY = 10;
 constexpr uint8_t RX_QUEUE_LENGTH = 12;
 constexpr char ZIGBEE_STORAGE_PARTITION[] = "zb_storage";
 
-struct PeerRoute {
-    uint32_t logicalId;
-    char hardwareId[32];
-    uint16_t shortAddress;
-    bool used;
-};
-
 ZigbeeTransport* activeTransport = nullptr;
 QueueHandle_t incomingMessages = nullptr;
-PeerRoute peerRoutes[PEER_CAPACITY] = {};
+ZigbeeRouteTable peerRoutes;
 portMUX_TYPE peerRoutesMux = portMUX_INITIALIZER_UNLOCKED;
 volatile bool activeNetwork = false;
 volatile bool stackStarted = false;
 
 void rememberRoute(const Message& message, uint16_t shortAddress) {
     portENTER_CRITICAL(&peerRoutesMux);
-    int8_t freeIndex = -1;
-    int8_t matchIndex = -1;
-    for (uint8_t i = 0; i < PEER_CAPACITY; ++i) {
-        if (!peerRoutes[i].used && freeIndex < 0) {
-            freeIndex = static_cast<int8_t>(i);
-        }
-        if (peerRoutes[i].used &&
-            ((message.sourceId != 0 && peerRoutes[i].logicalId == message.sourceId) ||
-             (message.hardwareId[0] != '\0' &&
-              strncmp(peerRoutes[i].hardwareId, message.hardwareId,
-                      sizeof(peerRoutes[i].hardwareId)) == 0))) {
-            matchIndex = static_cast<int8_t>(i);
-            break;
-        }
-    }
-
-    const int8_t index = matchIndex >= 0 ? matchIndex : freeIndex;
-    if (index >= 0) {
-        PeerRoute& route = peerRoutes[index];
-        route.logicalId = message.sourceId;
-        route.shortAddress = shortAddress;
-        route.used = true;
-        if (message.hardwareId[0] != '\0') {
-            strncpy(route.hardwareId, message.hardwareId,
-                    sizeof(route.hardwareId) - 1);
-            route.hardwareId[sizeof(route.hardwareId) - 1] = '\0';
-        }
-    }
+    peerRoutes.remember(message, shortAddress);
     portEXIT_CRITICAL(&peerRoutesMux);
 }
 
-bool findRoute(const Message& message, uint16_t& shortAddress) {
-    bool found = false;
+bool findRoute(const Message& message, uint32_t nextHopLogicalId,
+               CommunicationRouteScope scope, uint16_t& shortAddress) {
     portENTER_CRITICAL(&peerRoutesMux);
-    for (uint8_t i = 0; i < PEER_CAPACITY; ++i) {
-        if (!peerRoutes[i].used) {
-            continue;
-        }
-        const bool logicalMatch = message.destinationId != 0 &&
-                                  peerRoutes[i].logicalId == message.destinationId;
-        const bool hardwareMatch = message.hardwareId[0] != '\0' &&
-                                   strncmp(peerRoutes[i].hardwareId,
-                                           message.hardwareId,
-                                           sizeof(peerRoutes[i].hardwareId)) == 0;
-        if (logicalMatch || hardwareMatch) {
-            shortAddress = peerRoutes[i].shortAddress;
-            found = true;
-            break;
-        }
-    }
+    const bool found = nextHopLogicalId == 0
+        ? peerRoutes.find(message, shortAddress)
+        : peerRoutes.find(nextHopLogicalId, scope, shortAddress);
     portEXIT_CRITICAL(&peerRoutesMux);
     return found;
 }
@@ -321,7 +275,7 @@ bool ZigbeeTransport::begin() {
         return false;
     }
 
-    memset(peerRoutes, 0, sizeof(peerRoutes));
+    peerRoutes.clear();
     activeNetwork = false;
     stackStarted = false;
     activeTransport = this;
@@ -336,9 +290,27 @@ bool ZigbeeTransport::begin() {
 }
 
 bool ZigbeeTransport::send(const Message& message) {
+    return sendTo(message, 0, CommunicationRouteScope::LOCAL_DEVICE);
+}
+
+bool ZigbeeTransport::sendVia(
+    const Message& message,
+    uint32_t nextHopLogicalId,
+    CommunicationRouteScope scope
+) {
+    return nextHopLogicalId != 0 && sendTo(message, nextHopLogicalId, scope);
+}
+
+bool ZigbeeTransport::sendTo(
+    const Message& message,
+    uint32_t nextHopLogicalId,
+    CommunicationRouteScope scope
+) {
     if (!isReady()) {
         return false;
     }
+
+    if (nextHopLogicalId == 0) scope = ZigbeeRouteTable::destinationScope(message);
 
     uint8_t asdu[ZIGBEE_MESSAGE_MAX_ENCODED_SIZE] = {};
     size_t asduLength = 0;
@@ -348,16 +320,26 @@ bool ZigbeeTransport::send(const Message& message) {
     }
 
     ezb_apsde_data_req_t request = {};
-    const bool broadcast = isBroadcast(message);
+    const bool broadcast = nextHopLogicalId == 0 && isBroadcast(message);
     if (broadcast) {
         ezb_address_set_short(&request.dst_address,
                               BROADCAST_RX_ON_WHEN_IDLE);
     } else {
         uint16_t destination = 0;
-        if (!findRoute(message, destination)) {
-            ESP_LOGW(TAG, "No Zigbee route for logical destination %lu",
-                     static_cast<unsigned long>(message.destinationId));
+        const uint32_t routingId = nextHopLogicalId == 0
+            ? message.destinationId : nextHopLogicalId;
+        if (!findRoute(message, nextHopLogicalId, scope, destination)) {
+            ESP_LOGW(TAG, "No Zigbee route for logical destination %lu (scope %s)",
+                     static_cast<unsigned long>(routingId),
+                     scope == CommunicationRouteScope::CORE ? "CORE" : "LOCAL");
             return false;
+        }
+        if (isCoreCommandMessage(message) || isCoreCommandReply(message)) {
+            ESP_LOGI(TAG, "V7.2 TX message=%lu hop=%lu scope=%s address=0x%04x",
+                     static_cast<unsigned long>(message.id),
+                     static_cast<unsigned long>(routingId),
+                     scope == CommunicationRouteScope::CORE ? "CORE" : "LOCAL",
+                     destination);
         }
         ezb_address_set_short(&request.dst_address, destination);
     }
@@ -409,6 +391,14 @@ bool ZigbeeTransport::begin() {
 }
 
 bool ZigbeeTransport::send(const Message&) {
+    return false;
+}
+
+bool ZigbeeTransport::sendVia(const Message&, uint32_t, CommunicationRouteScope) {
+    return false;
+}
+
+bool ZigbeeTransport::sendTo(const Message&, uint32_t, CommunicationRouteScope) {
     return false;
 }
 

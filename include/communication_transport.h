@@ -4,6 +4,13 @@
 
 #include "message.h"
 
+// A CORE ID and a V5 pairing ID may have the same numeric value.
+// This scope selects a physical route; it is not part of the wire payload.
+enum class CommunicationRouteScope : uint8_t {
+    LOCAL_DEVICE,
+    CORE
+};
+
 
 /*
  * ============================================================
@@ -42,6 +49,17 @@ public:
     virtual bool send(
         const Message& message
     ) = 0;
+
+    /* Select a physical next hop without changing the logical message IDs. */
+    virtual bool sendVia(
+        const Message& message,
+        uint32_t nextHopLogicalId,
+        CommunicationRouteScope scope = CommunicationRouteScope::LOCAL_DEVICE
+    ) {
+        (void)nextHopLogicalId;
+        (void)scope;
+        return send(message);
+    }
 
 
     /*

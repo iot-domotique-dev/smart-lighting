@@ -1,6 +1,8 @@
 #pragma once
 
 #include "communication.h"
+#include "core_command_service.h"
+#include "core_command_uart.h"
 #include "core_uart_transport.h"
 
 /* Bridges topology messages between the existing Zigbee PAN and CORE-WIFI. */
@@ -8,6 +10,9 @@ class CoreZigbeeRuntime {
 private:
     Communication& zigbee;
     CoreUartTransport uart;
+    CoreCommandUart commandTransport;
+    Communication commandLink;
+    CoreCommandBridge commandBridge;
     uint32_t mainLocalId;
     uint32_t mainCoreId;
     uint16_t helloSequence;

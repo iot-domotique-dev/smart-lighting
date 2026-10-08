@@ -1,11 +1,13 @@
 #pragma once
 
 #include "communication.h"
+#include "core_command_service.h"
 
 /* Announces the MAIN's local identity and accepts the CORE-assigned ID. */
 class CoreMainRuntime {
 private:
     Communication& zigbee;
+    MainCommandRelay commandRelay;
     uint32_t localId;
     uint32_t assignedCoreId;
     uint32_t nextAnnouncementAt;
@@ -18,7 +20,7 @@ private:
     bool dispatch(const Message& message);
 
 public:
-    explicit CoreMainRuntime(Communication& zigbeeCommunication);
+    CoreMainRuntime(Communication& zigbeeCommunication, LampRegistry& lamps);
 
     bool begin(uint32_t mainLocalId);
     void poll();

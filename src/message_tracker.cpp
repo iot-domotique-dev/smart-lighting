@@ -2,6 +2,41 @@
 
 #include "message_tracker.h"
 #include "message_manager.h"
+#include "core_command_protocol.h"
+
+namespace {
+bool isCoreTrackedCommand(const Message& message) {
+    return isCoreCommandMessage(message);
+}
+
+bool validCoreAck(const Message& command, const Message& ack) {
+    if (static_cast<uint32_t>(ack.value2) != command.id || command.id == 0 ||
+        ack.destinationId != command.sourceId ||
+        ack.commandType != command.commandType ||
+        ack.parentMainId != command.parentMainId ||
+        ack.provisioningDeviceId != command.provisioningDeviceId) {
+        return false;
+    }
+    switch (ack.executionStatus) {
+        case ExecutionStatus::NOT_EXECUTED:
+            return ack.sourceId == command.parentMainId && ack.value == 0;
+        case ExecutionStatus::EXECUTED:
+            return ack.sourceId == command.destinationId &&
+                   ack.value == static_cast<int32_t>(ack.executionStatus);
+        case ExecutionStatus::PARTIAL:
+            // V7.2 SET_POWER is indivisible; only an explicit final result applies.
+            return false;
+        case ExecutionStatus::FAILED:
+            return (ack.sourceId == command.destinationId ||
+                    ack.sourceId == command.parentMainId ||
+                    ack.sourceId == command.sourceId) &&
+                   (ack.value == static_cast<int32_t>(ExecutionStatus::FAILED) ||
+                    (ack.value >= static_cast<int32_t>(CoreCommandError::UNKNOWN_DESTINATION) &&
+                     ack.value <= static_cast<int32_t>(CoreCommandError::DUPLICATE_ID)));
+    }
+    return false;
+}
+}  // namespace
 
 
 void initMessageTracker(
@@ -18,6 +53,8 @@ void initMessageTracker(
         tracker.messages[i].waitingForAck =
             false;
 
+        tracker.messages[i].accepted = false;
+
         tracker.messages[i].completed =
             false;
 
@@ -29,6 +66,8 @@ void initMessageTracker(
 
         tracker.messages[i].sentAt =
             0;
+
+        tracker.messages[i].firstSentAt = 0;
 
         tracker.messages[i].completedAt =
             0;
@@ -97,6 +136,8 @@ bool trackMessage(
     pending.waitingForAck =
         true;
 
+    pending.accepted = false;
+
     pending.completed =
         false;
 
@@ -108,6 +149,8 @@ bool trackMessage(
 
     pending.sentAt =
         millis();
+
+    pending.firstSentAt = pending.sentAt;
 
     pending.completedAt =
         0;
@@ -237,6 +280,28 @@ bool processAck(
     }
 
 
+    if (isCoreTrackedCommand(pending->message)) {
+        if (!pending->waitingForAck || pending->completed || pending->timedOut ||
+            !validCoreAck(pending->message, ack)) {
+            return false;
+        }
+        if (ack.executionStatus == ExecutionStatus::NOT_EXECUTED) {
+            pending->accepted = true;
+            pending->message.status = MessageStatus::DELIVERED;
+            Serial.print("Commande acceptee par MAIN : ");
+            Serial.println(originalMessageId);
+            return true;
+        }
+        if (ack.sourceId == pending->message.destinationId ||
+            ack.executionStatus != ExecutionStatus::FAILED) {
+            pending->accepted = true;
+        }
+        if (ack.executionStatus == ExecutionStatus::FAILED) {
+            // The request's value remains intact; value2 stores terminal cause.
+            pending->message.value2 = ack.value;
+        }
+    }
+
     pending->waitingForAck =
         false;
 
@@ -301,13 +366,15 @@ bool updateMessageTimeouts(
         }
 
 
-        uint32_t elapsed =
-            millis() -
-            pending.sentAt;
+        const uint32_t now = millis();
+        const uint32_t elapsed = now - pending.sentAt;
+        const bool coreDeadlineExpired = isCoreTrackedCommand(pending.message) &&
+            now - pending.firstSentAt >=
+                MESSAGE_TIMEOUT * (static_cast<uint32_t>(MAX_MESSAGE_RETRIES) + 1);
 
 
         if (
-            elapsed <
+            !coreDeadlineExpired && elapsed <
             MESSAGE_TIMEOUT
         ) {
             continue;
@@ -333,7 +400,7 @@ bool updateMessageTimeouts(
          */
 
         if (
-            pending.retryCount <
+            !coreDeadlineExpired && pending.retryCount <
             MAX_MESSAGE_RETRIES
         ) {
 
@@ -401,7 +468,9 @@ bool updateMessageTimeouts(
 
 
         pending.message.executionStatus =
-            ExecutionStatus::FAILED;
+            isCoreTrackedCommand(pending.message)
+                ? ExecutionStatus::NOT_EXECUTED
+                : ExecutionStatus::FAILED;
 
 
         Serial.println(
@@ -457,6 +526,9 @@ void printPendingMessage(
             ? "OUI"
             : "NON"
     );
+
+    Serial.print("Accepted : ");
+    Serial.println(pending.accepted ? "OUI" : "NON");
 
 
     Serial.print(

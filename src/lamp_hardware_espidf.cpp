@@ -28,11 +28,10 @@ void initializeLampHardware() {
     }
 }
 
-void writeLampHardwarePower(bool enabled) {
-    if (outputInitialized) {
-        (void)gpio_set_level(static_cast<gpio_num_t>(SMART_LIGHTING_LED_GPIO),
-                             enabled ? 1 : 0);
-    }
+bool writeLampHardwarePower(bool enabled) {
+    return outputInitialized &&
+           gpio_set_level(static_cast<gpio_num_t>(SMART_LIGHTING_LED_GPIO),
+                          enabled ? 1 : 0) == ESP_OK;
 }
 
 #else
@@ -45,6 +44,12 @@ void initializeLampHardware() {
 #endif
 }
 
-void writeLampHardwarePower(bool) {}
+bool writeLampHardwarePower(bool) {
+#if defined(SMART_LIGHTING_ZIGBEE) && defined(DEVICE_ROLE_LAMP)
+    return false;
+#else
+    return true;
+#endif
+}
 
 #endif

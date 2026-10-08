@@ -1,14 +1,16 @@
 # Smart Lighting
 
-Projet de modules d’éclairage ESP32. La référence terrain actuelle est le lien Zigbee V5 entre MAIN_LIGHTING et LAMP_C6. Le jalon V7 prépare un CORE logique composé de deux ESP32-C6 et une API locale pour une future application.
+Projet de modules d’éclairage ESP32. V7.1 fournit un CORE logique composé de deux ESP32-C6 et un inventaire hiérarchique en lecture seule. V7.2 valide le trajet SET_POWER entre les quatre cartes; V7.3 expose maintenant cette commande par l’API HTTP locale authentifiée.
 
 ## État actuel
 
 - **V5 éclairage :** MAIN_LIGHTING communique avec LAMP_C6 par Zigbee; la commande power pilote la sortie GPIO18 de la lampe.
 - **V7.1.1 réseau/API :** CORE-WIFI rejoint le Wi-Fi avec DHCP. Depuis un PC du même réseau, les routes HTTP ont répondu comme prévu : 200 pour health, core, modules et devices; 404 pour un ID inconnu; 405 pour POST sur une route en GET seulement.
-- **Encore à valider sur le matériel :** le trajet complet des annonces et de l’attribution d’ID entre les quatre cartes CORE-WIFI, CORE-ZIGBEE, MAIN_LIGHTING et LAMP_C6. Les listes API actuellement vides sont cohérentes tant que le registre CORE n’a pas reçu les annonces.
+- **V7.1 validée sur matériel :** MAIN_LIGHTING et lamp001 apparaissent en ligne dans l’API, avec leurs IDs V7 et leurs parents. Les annonces et l’attribution d’ID ont été observées entre les quatre cartes.
+- **V7.2 validée sur matériel :** SET_POWER fonctionne de CORE-WIFI jusqu’à LAMP, avec ACK d’acceptation et d’exécution, retransmission, déduplication et expiration lorsque le retour d’ACK est coupé. Les 85 tests natifs passent et les quatre profils matériels compilent. Le [dossier V7.2](docs/V7_2_COMMANDS.md) consigne les résultats, la procédure et les limites.
+- **V7.3 validée fonctionnellement :** l’API HTTP authentifiée de SET_POWER fonctionne sur les quatre cartes; ON/OFF, le suivi terminal, les refus d’accès, les corps invalides, les destinations inconnues et les cibles offline ont des résultats consignés. L’utilisateur confirme aussi la reprise et l’expiration; l’image utilise 994 816 octets sur 1 Mio et laisse 53 760 octets.
 
-La validation complète V7 reste en attente du test matériel avec les quatre cartes réunies.
+Le jeton de l’API de commande doit être défini dans le fichier local `include/wifi_credentials.h`; sans jeton valide, les routes de commande restent désactivées. Vérifier la marge flash CORE-WIFI après compilation avant flash matériel.
 
 ## Architecture
 
@@ -24,7 +26,7 @@ Application mobile (future)
  MAIN_LIGHTING ─── Zigbee V5 ─── LAMP_C6
 ~~~
 
-Le CORE garde l’ID racine 1. L’application ne communique pas directement avec Zigbee. Le VPN distant et les commandes API ne sont pas implémentés à cette étape.
+Le CORE garde l’ID racine 1. L’application ne communique pas directement avec Zigbee. Le VPN distant et l’application mobile restent à réaliser.
 
 ## Profils PlatformIO maintenus
 

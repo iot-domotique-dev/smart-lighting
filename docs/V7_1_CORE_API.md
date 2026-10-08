@@ -2,7 +2,7 @@
 
 ## Portée et statut
 
-V7.1 expose en lecture seule l’état du CORE et l’inventaire qu’il a reçu. Le serveur HTTP utilise le composant ESP-IDF esp_http_server et n’est compilé que pour core_wifi_c6. Aucune application mobile, route de commande, base de données, VPN ou service cloud n’est inclus.
+V7.1 expose en lecture seule l’état du CORE et l’inventaire qu’il a reçu. Le serveur HTTP utilise le composant ESP-IDF esp_http_server et n’est compilé que pour core_wifi_c6. Ce document décrit le contrat initial V7.1; V7.3 ajoute les routes de commande décrites dans [le guide V7.3](V7_3_HTTP_COMMANDS.md).
 
 **V7 a été validée sur le montage à quatre cartes le 7 octobre 2026**, d’après les captures HTTP et les confirmations de l’utilisateur. La capture finale de l’API contient MAIN_LIGHTING et sa lampe `lamp001`, tous deux online. Le registre est alimenté par le parcours Zigbee et UART. Les résultats matériels et les **52 tests natifs réussis** sont consignés dans [CORE double C6](V7_CORE_DOUBLE_C6.md#validation-du-7-octobre-2026).
 
@@ -159,8 +159,8 @@ Les erreurs partagent cette forme :
 
 ## Sécurité et limites
 
-- Le serveur utilise HTTP local sans authentification ni chiffrement applicatif. Ne pas exposer le port 80 sur Internet.
-- Le VPN, l’authentification et la sécurisation d’un accès distant sont hors périmètre.
+- Les routes de lecture V7.1 sont en HTTP sans authentification ni chiffrement. Les routes de commande V7.3 exigent un Bearer token, mais restent en HTTP sans chiffrement; ne pas exposer le port 80 sur Internet.
+- Le VPN et la sécurisation d’un accès distant sont hors périmètre.
 - Les états électriques ne sont pas encore disponibles dans le registre global; state: null l’indique.
 - Le firmware CORE-WIFI a été mesuré à **978 900 octets sur 1 048 576 (93,4 %)** pour la partition application, soit environ 69 676 octets libres. La marge est limitée; toute nouvelle dépendance ou fonctionnalité doit être mesurée.
 - Le champ firmware_version observé lors de l’essai affichait v7.0.0-dirty; il s’agit de la métadonnée de build embarquée, distincte du jalon fonctionnel documenté ici.

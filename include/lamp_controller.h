@@ -3,7 +3,7 @@
 #include "lamp.h"
 
 
-void setLampPower(
+bool setLampPower(
     Lamp& lamp,
     bool state
 );

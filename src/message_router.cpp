@@ -6,6 +6,7 @@
 #include "message_id_generator.h"
 #include "device_manager.h"
 #include "event_bus.h"
+#include "core_command_protocol.h"
 
 namespace {
 constexpr uint8_t MAX_APPLICATION_MESSAGE_HANDLERS = 4;
@@ -120,6 +121,27 @@ static void sendAck(
     );
 }
 
+static void sendCoreExecutionAck(
+    Communication& communication,
+    const Message& command,
+    uint32_t replyHop,
+    ExecutionStatus result,
+    CoreCommandError error,
+    bool dropAck
+) {
+    const bool diagnosticDrop = consumeDropNextCoreExecutionAck();
+    if (dropAck || diagnosticDrop) {
+        Serial.print("ACK volontairement perdu pour commande CORE : ");
+        Serial.println(command.id);
+        return;
+    }
+    const Message ack = makeCoreCommandAck(command, command.destinationId,
+                                           result, error);
+    if (!sendMessageVia(communication, ack, replyHop)) {
+        Serial.println("[V7.2] unable to return execution ACK through MAIN");
+    }
+}
+
 
 /*
  * ============================================================
@@ -221,6 +243,83 @@ void processMessages(
             message.type !=
             MessageType::COMMAND
         ) {
+            continue;
+        }
+
+        if (isCoreCommandMessage(message)) {
+            uint32_t targetId = 0;
+            uint32_t replyHop = 0;
+            const CoreCommandError routing = resolveCoreLampCommand(
+                lamps, message, targetId, replyHop);
+            if (routing != CoreCommandError::NONE &&
+                routing != CoreCommandError::OFFLINE) {
+                sendCoreExecutionAck(communication, message, replyHop,
+                                     ExecutionStatus::FAILED, routing, dropNextAck);
+                dropNextAck = false;
+                continue;
+            }
+
+            ProcessedMessage* processed = findProcessedMessage(
+                deduplicator, message.sourceId, message.id);
+            if (processed != nullptr) {
+                const bool sameCommand = processed->hasCommandIdentity &&
+                    processed->destinationId == message.destinationId &&
+                    processed->parentMainId == message.parentMainId &&
+                    processed->provisioningDeviceId == message.provisioningDeviceId &&
+                    processed->commandType == message.commandType &&
+                    processed->value == message.value;
+                if (!sameCommand) {
+                    sendCoreExecutionAck(communication, message, replyHop,
+                                         ExecutionStatus::FAILED,
+                                         CoreCommandError::DUPLICATE_ID, dropNextAck);
+                    dropNextAck = false;
+                    continue;
+                }
+                Serial.print("[V7.2] duplicate command, no execution : ");
+                Serial.println(message.id);
+                if (processed->executionStatus != ExecutionStatus::NOT_EXECUTED) {
+                    sendCoreExecutionAck(communication, message, replyHop,
+                                         processed->executionStatus,
+                                         CoreCommandError::NONE, false);
+                }
+                continue;
+            }
+            if (routing == CoreCommandError::OFFLINE) {
+                sendCoreExecutionAck(communication, message, replyHop,
+                                     ExecutionStatus::FAILED, routing, dropNextAck);
+                dropNextAck = false;
+                continue;
+            }
+
+            constexpr uint32_t RETRY_PROTECTION_MS = 60000;
+            if (!reserveProcessedMessage(deduplicator, message.sourceId,
+                                         message.id, RETRY_PROTECTION_MS)) {
+                sendCoreExecutionAck(communication, message, replyHop,
+                                     ExecutionStatus::FAILED,
+                                     CoreCommandError::DEDUP_FULL, dropNextAck);
+                dropNextAck = false;
+                continue;
+            }
+
+            ProcessedMessage* reserved = findProcessedMessage(
+                deduplicator, message.sourceId, message.id);
+            reserved->destinationId = message.destinationId;
+            reserved->parentMainId = message.parentMainId;
+            reserved->provisioningDeviceId = message.provisioningDeviceId;
+            reserved->commandType = message.commandType;
+            reserved->value = message.value;
+            reserved->hasCommandIdentity = true;
+
+            const Action action = {
+                static_cast<ActionType>(message.commandType), targetId, message.value
+            };
+            const ExecutionStatus result = executeAction(action, scenes, groups, lamps);
+            // The reserved entry cannot be evicted while its execution is pending.
+            (void)registerProcessedMessage(deduplicator, message.sourceId,
+                                           message.id, result);
+            sendCoreExecutionAck(communication, message, replyHop, result,
+                                 CoreCommandError::NONE, dropNextAck);
+            dropNextAck = false;
             continue;
         }
 
