@@ -4,7 +4,7 @@
 
 V7.3 ajoute une interface HTTP sur CORE-WIFI pour soumettre `SET_POWER` à une lampe et consulter le suivi V7.2 existant. La commande traverse ensuite CORE-WIFI, UART, CORE-ZIGBEE, Zigbee, MAIN et LAMP comme la commande console déjà validée.
 
-L’implémentation compile avec le profil `core_wifi_c6`. La mesure de cette révision V7.3 était de **994 816 octets** dans une partition de **1 048 576 octets**, soit **53 760 octets libres** (94,87 % utilisés); ce chiffre est historique et ne décrit pas l’image V7.4.2. La validation fonctionnelle V7.3 sur carte est confirmée par l’utilisateur le **8 octobre 2026**. Les traces détaillées disponibles couvrent ON/OFF, le suivi et les principaux refus HTTP; les autres scénarios sont confirmés globalement par l’utilisateur.
+L’implémentation compile avec le profil `core_wifi_c6`. L’image mesurée fait **994 816 octets** dans une partition de **1 048 576 octets**, soit **53 760 octets libres** (94,87 % utilisés). Les parcours nominaux HTTP → lampe ON et OFF ont été validés sur carte le **8 octobre 2026**; les cas d’erreur et de reprise restent à réaliser.
 
 Le serveur HTTP n’ajoute pas de tâche d’exécution de commande : la boucle CORE-WIFI conserve la responsabilité des ACK, retries et expirations. L’accès HTTP et la boucle partagent le mutex du registre afin de protéger aussi le tracker et le générateur d’IDs.
 
@@ -100,7 +100,7 @@ Les états sont `sent`, `accepted`, `executed`, `failed` et `expired`. Pour `fai
 
 ## Validation
 
-Cette procédure reste reproductible en suivant les essais V7.2 décrits dans [le dossier de commande](V7_2_COMMANDS.md), en soumettant les ordres depuis PowerShell à la place de la console série. Elle couvre ON/OFF, état `executed`, token absent/incorrect, ID inconnu et cible offline. Les essais d’expiration et de perte d’ACK sont décrits dans le dossier V7.2 et la clôture V7.4. La mesure de flash courante après V7.4.2 est documentée dans [V7.4](V7_4_RELIABILITY.md).
+Valider sur matériel en suivant les mêmes essais V7.2 décrits dans [le dossier de commande](V7_2_COMMANDS.md), en soumettant les ordres depuis PowerShell à la place de la console série. Vérifier ON/OFF, état `executed`, token absent/incorrect, ID inconnu, cible offline, perte d’ACK avec retry/déduplication et expiration. La compilation actuelle confirme que l’image `core_wifi_c6` tient encore dans sa partition de 1 Mio avec 53 760 octets de marge. Le test nominal ci-dessous ne suffit pas à lui seul pour déclarer la validation complète V7.3.
 
 ### Résultat matériel — 8 octobre 2026
 
@@ -108,7 +108,7 @@ Le parcours `POST` avec `{"state":"on"}` a renvoyé l’ID `1978340518` et l’�
 
 Le parcours `POST` avec `{"state":"off"}` a renvoyé l’ID `2817180636` et l’état initial `sent`. CORE-WIFI a journalisé `accepted`, puis `executed retries=0`; LAMP a reçu la commande pour `3559985816` et affiché `Power -> OFF`. L’état terminal OFF provient du tracker CORE; la réponse HTTP GET de suivi pour cet ID n’a pas été fournie.
 
-ON et OFF confirment le parcours nominal HTTP jusqu’à LAMP. Le rejet d’un jeton incorrect, la lecture d’un état terminal, le jeton absent, les corps invalides, l’ID inconnu et le refus d’une cible offline sont également consignés ci-dessous. Les traces V7.3 de retry/expiration via HTTP n’ont pas toutes été archivées; les essais V7.4.2 disposent d’IDs distincts dans [leur dossier](V7_4_RELIABILITY.md).
+ON et OFF confirment le parcours nominal HTTP jusqu’à LAMP. Le rejet d’un jeton incorrect et la lecture HTTP d’un état terminal sont également confirmés. Les erreurs de corps/destination, le jeton absent, le retry et l’expiration via HTTP restent à tester.
 
 Le 8 octobre, une requête avec un Bearer token incorrect a reçu `401 unauthorized`. Avec le jeton correct, le `POST` OFF suivant a créé la commande `2817180637`, puis `GET /api/v1/commands/2817180637` a renvoyé `executed`, `retries=0`. Cela valide le contrôle d’accès par jeton invalide et la lecture HTTP du résultat terminal. La tentative rejetée n’a pas remplacé la variable PowerShell `$request`; l’ID affiché après l’erreur était donc celui de la requête précédente.
 
@@ -119,5 +119,3 @@ Un `POST` authentifié avec `{"state":"maybe"}` a reçu `400 Bad Request`, code 
 Un `POST` authentifié avec un corps valide `{"state":"off"}` vers l’ID absent `999999` a reçu `404`, code `unknown_destination`. La réponse ne contient pas d’ID de commande; le rejet est fait avant création et envoi.
 
 Après débranchement de LAMP_C6, `GET /api/v1/devices` a indiqué `online=false` et `status=offline` pour l’ID `3559985816`. Un `POST` OFF authentifié à cette cible a reçu `409 Conflict`, code `offline`, sans ID de commande.
-
-L’utilisateur confirme que l’ensemble des essais fonctionne, y compris la reprise, les retries et l’expiration via HTTP. Les traces de ces derniers scénarios n’ont pas été fournies dans la conversation; la validation fonctionnelle est donc confirmée, mais leur détail n’est pas archivé ici.

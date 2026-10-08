@@ -11,13 +11,14 @@ Projet de modules d’éclairage ESP32. V7.1 fournit un CORE logique composé de
 - **V7.3 validée fonctionnellement :** l’API HTTP authentifiée de `SET_POWER` fonctionne sur les quatre cartes; ON/OFF, le suivi terminal et les erreurs HTTP sont consignés dans [la documentation V7.3](docs/V7_3_HTTP_COMMANDS.md). Son empreinte de 994 816 octets est une mesure historique de cette révision.
 - **V7.4.1 validée en natif :** un scénario couvre le routage indépendant de deux lampes derrière le même MAIN; 86/86 tests passaient à cette étape. Le banc matériel utilisé ensuite ne comporte qu’une LAMP, donc le routage de deux lampes n’a pas été vérifié physiquement.
 - **V7.4.2 validée fonctionnellement sur matériel :** 92/92 tests natifs réussis et 4/4 profils C6 compilés. ON/OFF, ACK `executed`, cohérence HTTP, `confirmed → stale` hors ligne, reconnexion, expiration et `execution_unknown` ont été observés. `last_confirmed_state` est un historique logiciel, pas une mesure électrique; il redevient `unknown` au redémarrage du CORE-WIFI. Détails et IDs figurent dans le [dossier V7.4](docs/V7_4_RELIABILITY.md). L’image CORE-WIFI utilise 995 810 octets sur 1 Mio et laisse 52 766 octets.
+- **V7.5.1/V7.5.2 — application mobile :** l’application Android Expo SDK 57 consulte CORE-WIFI et pilote les lampes en ON/OFF via l’API existante. Le premier essai nominal a été confirmé par l’utilisateur avec une LED de test raccordée à GPIO18 d’une LAMP_C6. Le bilan logiciel et les limites matérielles restantes sont dans le [dossier V7.5](docs/V7_5_MOBILE_APP.md).
 
 Le jeton de l’API de commande doit être défini dans le fichier local `include/wifi_credentials.h`; sans jeton valide, les routes de commande restent désactivées. Vérifier la marge flash CORE-WIFI après compilation avant flash matériel.
 
 ## Architecture
 
 ~~~text
-Application mobile (future)
+Application mobile Android (V7.5)
              │ HTTP local /api/v1
              ▼
    C6-WIFI — registre CORE, IDs, Wi-Fi, API
@@ -28,7 +29,7 @@ Application mobile (future)
  MAIN_LIGHTING ─── Zigbee V5 ─── LAMP_C6
 ~~~
 
-Le CORE garde l’ID racine 1. L’application ne communique pas directement avec Zigbee. Le VPN distant et l’application mobile restent à réaliser.
+Le CORE garde l’ID racine 1. L’application ne communique pas directement avec Zigbee. L’accès distant sécurisé et le support multi-MAIN matériel restent à réaliser.
 
 ## Profils PlatformIO maintenus
 
@@ -53,4 +54,4 @@ Pour créer les credentials Wi-Fi, flasher CORE-WIFI et interroger l’API, suiv
 
 ## Documentation
 
-L’[index des documents](docs/README.md) mène aux références V5 et V7. Les anciens documents de versions sont conservés dans [docs/archive](docs/archive/README.md); ils décrivent l’historique et ne sont pas les instructions courantes.
+L’[index des documents](docs/README.md) mène aux références V5 et V7, dont le [dossier de l’application mobile](docs/V7_5_MOBILE_APP.md). Les anciens documents de versions sont conservés dans [docs/archive](docs/archive/README.md); ils décrivent l’historique et ne sont pas les instructions courantes.
