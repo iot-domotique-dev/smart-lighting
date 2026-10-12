@@ -2,6 +2,7 @@
 
 #include "core_api_service.h"
 #include "core_command_service.h"
+#include "core_pairing_state.h"
 #include "core_uart_transport.h"
 #include "device_registry.h"
 #include "message_tracker.h"
@@ -24,10 +25,12 @@ private:
     MessageTracker& tracker;
     const char* apiToken;
     SemaphoreHandle_t* registryMutex;
+    CorePairingState pairing;
     bool started;
 #if defined(SMART_LIGHTING_CORE_WIFI)
     httpd_handle_t server;
     static esp_err_t handleRequest(httpd_req_t* request);
+    esp_err_t handlePairingRequest(httpd_req_t* request);
 #endif
 
 public:
@@ -41,4 +44,6 @@ public:
 
     bool begin();
     bool isReady() const;
+    void handlePairingPacket(const CoreLinkPacket& packet);
+    void pollPairing(uint32_t now);
 };

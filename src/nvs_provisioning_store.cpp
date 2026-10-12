@@ -15,6 +15,8 @@ constexpr char KEY_HARDWARE_ID[] = "hardware_id";
 constexpr char KEY_NAME[] = "name";
 constexpr char KEY_PARENT_MAIN_ID[] = "parent_main_id";
 constexpr char KEY_PAIRING_STATE[] = "pairing_state";
+constexpr char MAIN_NVS_NAMESPACE[] = "main_pairing";
+constexpr char MAIN_RESERVATIONS_KEY[] = "reservations";
 
 bool getString(nvs_handle_t handle, const char* key, char* output, size_t capacity) {
     size_t required = 0;
@@ -93,6 +95,57 @@ bool NvsProvisioningStore::clear() {
     return commitResult == ESP_OK;
 }
 
+bool NvsProvisioningReservationStore::load(
+    uint32_t mainId,
+    MainProvisioningReservationState& state
+) const {
+    initializeMainProvisioningReservationState(mainId, state);
+    if (mainId == 0) {
+        return false;
+    }
+
+    nvs_handle_t handle;
+    const esp_err_t openResult =
+        nvs_open(MAIN_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (openResult == ESP_ERR_NVS_NOT_FOUND) {
+        return true;
+    }
+    if (openResult != ESP_OK) {
+        return false;
+    }
+
+    size_t required = 0;
+    const esp_err_t sizeResult =
+        nvs_get_blob(handle, MAIN_RESERVATIONS_KEY, nullptr, &required);
+    if (sizeResult != ESP_OK || required != sizeof(state)) {
+        nvs_close(handle);
+        return false;
+    }
+    const esp_err_t readResult =
+        nvs_get_blob(handle, MAIN_RESERVATIONS_KEY, &state, &required);
+    nvs_close(handle);
+    return readResult == ESP_OK &&
+           isValidMainProvisioningReservationState(state, mainId);
+}
+
+bool NvsProvisioningReservationStore::save(
+    const MainProvisioningReservationState& state
+) {
+    if (!isValidMainProvisioningReservationState(state, state.mainId)) {
+        return false;
+    }
+    nvs_handle_t handle;
+    if (nvs_open(MAIN_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return false;
+    }
+    const esp_err_t result = nvs_set_blob(
+            handle, MAIN_RESERVATIONS_KEY, &state, sizeof(state)) == ESP_OK
+        ? nvs_commit(handle)
+        : ESP_FAIL;
+    nvs_close(handle);
+    return result == ESP_OK;
+}
+
 #else
 
 bool NvsProvisioningStore::load(ProvisioningRecord& record) const {
@@ -106,6 +159,20 @@ bool NvsProvisioningStore::save(const ProvisioningRecord&) {
 
 bool NvsProvisioningStore::clear() {
     return true;
+}
+
+bool NvsProvisioningReservationStore::load(
+    uint32_t,
+    MainProvisioningReservationState& state
+) const {
+    memset(&state, 0, sizeof(state));
+    return false;
+}
+
+bool NvsProvisioningReservationStore::save(
+    const MainProvisioningReservationState&
+) {
+    return false;
 }
 
 #endif

@@ -378,6 +378,35 @@ const char* ZigbeeTransport::name() const {
     return "ESP-ZIGBEE-APS";
 }
 
+bool openZigbeeJoinWindow(uint8_t durationSeconds) {
+    if (DEVICE_ROLE != DeviceRole::MAIN || !stackStarted || !activeNetwork ||
+        durationSeconds == 0 || !esp_zigbee_lock_acquire(pdMS_TO_TICKS(5000))) {
+        return false;
+    }
+    const ezb_err_t result = ezb_bdb_open_network(durationSeconds);
+    esp_zigbee_lock_release();
+    return result == EZB_ERR_NONE;
+}
+
+bool closeZigbeeJoinWindow() {
+    if (DEVICE_ROLE != DeviceRole::MAIN || !stackStarted || !activeNetwork ||
+        !esp_zigbee_lock_acquire(pdMS_TO_TICKS(5000))) {
+        return false;
+    }
+    const ezb_err_t result = ezb_bdb_close_network();
+    esp_zigbee_lock_release();
+    return result == EZB_ERR_NONE;
+}
+
+bool hasZigbeeRouteForHardwareId(const char* hardwareId) {
+    if (hardwareId == nullptr || hardwareId[0] == '\0') return false;
+    Message request = {};
+    request.type = MessageType::PAIR_REQUEST;
+    strncpy(request.hardwareId, hardwareId, sizeof(request.hardwareId) - 1);
+    uint16_t address = 0;
+    return findRoute(request, 0, CommunicationRouteScope::LOCAL_DEVICE, address);
+}
+
 #else
 
 ZigbeeTransport::ZigbeeTransport()
@@ -415,5 +444,9 @@ void ZigbeeTransport::markStackStarted() {}
 const char* ZigbeeTransport::name() const {
     return "ESP-ZIGBEE-UNAVAILABLE";
 }
+
+bool openZigbeeJoinWindow(uint8_t) { return false; }
+bool closeZigbeeJoinWindow() { return false; }
+bool hasZigbeeRouteForHardwareId(const char*) { return false; }
 
 #endif

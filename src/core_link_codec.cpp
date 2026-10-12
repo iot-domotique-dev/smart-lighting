@@ -59,7 +59,42 @@ uint16_t crc16Ccitt(const uint8_t* data, size_t length) {
 
 bool isValidType(uint8_t value) {
     return value >= static_cast<uint8_t>(CoreLinkMessageType::HELLO) &&
-           value <= static_cast<uint8_t>(CoreLinkMessageType::COMMAND_RESULT);
+           value <= static_cast<uint8_t>(CoreLinkMessageType::PAIRING);
+}
+
+bool isValidPairingResult(uint8_t value) {
+    return value > static_cast<uint8_t>(CorePairingResultCode::NONE) &&
+           value <= static_cast<uint8_t>(CorePairingResultCode::ROUTE_UNAVAILABLE);
+}
+
+bool validPairingPacket(const CoreLinkPacket& packet) {
+    if (packet.type != CoreLinkMessageType::PAIRING || packet.localId == 0 ||
+        packet.pairingAction == CoreLinkPairingAction::NONE) return false;
+    switch (packet.pairingAction) {
+        case CoreLinkPairingAction::OPEN_SESSION:
+            return packet.sessionId != 0 && packet.pairingDurationSeconds >= 15 &&
+                   packet.pairingDurationSeconds <= 180;
+        case CoreLinkPairingAction::CLOSE_SESSION:
+            return packet.sessionId != 0;
+        case CoreLinkPairingAction::CANDIDATE:
+            return packet.sessionId != 0 && packet.hardwareId[0] != '\0';
+        case CoreLinkPairingAction::PAIR_CANDIDATE:
+            return packet.sessionId != 0 && packet.operationId != 0 &&
+                   packet.hardwareId[0] != '\0' && packet.pairingName[0] != '\0';
+        case CoreLinkPairingAction::SESSION_RESULT:
+            return packet.sessionId != 0 &&
+                   packet.pairingResult > CorePairingResultCode::NONE &&
+                   packet.pairingResult <= CorePairingResultCode::ROUTE_UNAVAILABLE;
+        case CoreLinkPairingAction::OPERATION_RESULT:
+            return packet.sessionId != 0 && packet.operationId != 0 &&
+                   packet.pairingResult > CorePairingResultCode::NONE &&
+                   packet.pairingResult <= CorePairingResultCode::ROUTE_UNAVAILABLE;
+        case CoreLinkPairingAction::CANDIDATE_LIMIT:
+            return packet.sessionId != 0;
+        case CoreLinkPairingAction::NONE:
+            return false;
+    }
+    return false;
 }
 
 bool isValidCommandMessage(const Message& message, CoreLinkMessageType type) {
@@ -147,6 +182,111 @@ bool appendName(const char* name, uint8_t* output, size_t capacity, size_t& offs
     return true;
 }
 
+bool readName(const uint8_t* input, size_t length, size_t& offset,
+              char* name, size_t capacity);
+
+bool appendPairingPacket(const CoreLinkPacket& packet, uint8_t* output,
+                         size_t capacity, size_t& offset) {
+    if (!validPairingPacket(packet) || offset > capacity ||
+        capacity - offset < 5) return false;
+    size_t fixedBytes = 0;
+    switch (packet.pairingAction) {
+        case CoreLinkPairingAction::OPEN_SESSION: fixedBytes = 6; break;
+        case CoreLinkPairingAction::CLOSE_SESSION: fixedBytes = 4; break;
+        case CoreLinkPairingAction::CANDIDATE: fixedBytes = 8; break;
+        case CoreLinkPairingAction::PAIR_CANDIDATE: fixedBytes = 8; break;
+        case CoreLinkPairingAction::SESSION_RESULT: fixedBytes = 5; break;
+        case CoreLinkPairingAction::OPERATION_RESULT: fixedBytes = 13; break;
+        case CoreLinkPairingAction::CANDIDATE_LIMIT: fixedBytes = 4; break;
+        case CoreLinkPairingAction::NONE: return false;
+    }
+    if (capacity - offset - 5 < fixedBytes) return false;
+    output[offset++] = static_cast<uint8_t>(packet.pairingAction);
+    writeU32(output, offset, packet.localId);
+    switch (packet.pairingAction) {
+        case CoreLinkPairingAction::OPEN_SESSION:
+            writeU32(output, offset, packet.sessionId);
+            writeU16(output, offset, packet.pairingDurationSeconds);
+            return offset <= capacity;
+        case CoreLinkPairingAction::CLOSE_SESSION:
+            writeU32(output, offset, packet.sessionId);
+            return offset <= capacity;
+        case CoreLinkPairingAction::CANDIDATE:
+            writeU32(output, offset, packet.sessionId);
+            writeU32(output, offset, packet.capabilities);
+            return appendName(packet.hardwareId, output, capacity, offset);
+        case CoreLinkPairingAction::PAIR_CANDIDATE:
+            writeU32(output, offset, packet.sessionId);
+            writeU32(output, offset, packet.operationId);
+            return appendName(packet.hardwareId, output, capacity, offset) &&
+                   appendName(packet.pairingName, output, capacity, offset);
+        case CoreLinkPairingAction::SESSION_RESULT:
+            writeU32(output, offset, packet.sessionId);
+            output[offset++] = static_cast<uint8_t>(packet.pairingResult);
+            return offset <= capacity;
+        case CoreLinkPairingAction::OPERATION_RESULT:
+            writeU32(output, offset, packet.sessionId);
+            writeU32(output, offset, packet.operationId);
+            output[offset++] = static_cast<uint8_t>(packet.pairingResult);
+            writeU32(output, offset, packet.deviceId);
+            return appendName(packet.hardwareId, output, capacity, offset);
+        case CoreLinkPairingAction::CANDIDATE_LIMIT:
+            writeU32(output, offset, packet.sessionId);
+            return offset <= capacity;
+        case CoreLinkPairingAction::NONE:
+            return false;
+    }
+    return false;
+}
+
+bool readPairingPacket(const uint8_t* input, size_t length, size_t& offset,
+                       CoreLinkPacket& packet) {
+    if (offset >= length) return false;
+    const uint8_t action = input[offset++];
+    if (action == 0 || action > static_cast<uint8_t>(CoreLinkPairingAction::CANDIDATE_LIMIT) ||
+        !readU32(input, length, offset, packet.localId)) return false;
+    packet.type = CoreLinkMessageType::PAIRING;
+    packet.pairingAction = static_cast<CoreLinkPairingAction>(action);
+    switch (packet.pairingAction) {
+        case CoreLinkPairingAction::OPEN_SESSION:
+            return readU32(input, length, offset, packet.sessionId) &&
+                   readU16(input, length, offset, packet.pairingDurationSeconds);
+        case CoreLinkPairingAction::CLOSE_SESSION:
+            return readU32(input, length, offset, packet.sessionId);
+        case CoreLinkPairingAction::CANDIDATE:
+            return readU32(input, length, offset, packet.sessionId) &&
+                   readU32(input, length, offset, packet.capabilities) &&
+                   readName(input, length, offset, packet.hardwareId,
+                            sizeof(packet.hardwareId));
+        case CoreLinkPairingAction::PAIR_CANDIDATE:
+            return readU32(input, length, offset, packet.sessionId) &&
+                   readU32(input, length, offset, packet.operationId) &&
+                   readName(input, length, offset, packet.hardwareId,
+                            sizeof(packet.hardwareId)) &&
+                   readName(input, length, offset, packet.pairingName,
+                            sizeof(packet.pairingName));
+        case CoreLinkPairingAction::SESSION_RESULT:
+            if (!readU32(input, length, offset, packet.sessionId) || offset >= length)
+                return false;
+            if (!isValidPairingResult(input[offset])) return false;
+            packet.pairingResult = static_cast<CorePairingResultCode>(input[offset++]);
+            return true;
+        case CoreLinkPairingAction::OPERATION_RESULT:
+            if (!readU32(input, length, offset, packet.sessionId) ||
+                !readU32(input, length, offset, packet.operationId) ||
+                offset >= length || !isValidPairingResult(input[offset])) return false;
+            packet.pairingResult = static_cast<CorePairingResultCode>(input[offset++]);
+            return readU32(input, length, offset, packet.deviceId) &&
+                   readName(input, length, offset, packet.hardwareId,
+                            sizeof(packet.hardwareId));
+        case CoreLinkPairingAction::CANDIDATE_LIMIT:
+            return readU32(input, length, offset, packet.sessionId);
+        case CoreLinkPairingAction::NONE:
+            return false;
+    }
+    return false;
+}
+
 bool readName(
     const uint8_t* input,
     size_t length,
@@ -229,6 +369,12 @@ bool encodeCoreLinkFrame(
         case CoreLinkMessageType::COMMAND_RESULT:
             if (!appendCommandMessage(packet.message, packet.type, output,
                                       outputCapacity, offset)) {
+                return false;
+            }
+            break;
+
+        case CoreLinkMessageType::PAIRING:
+            if (!appendPairingPacket(packet, output, outputCapacity, offset)) {
                 return false;
             }
             break;
@@ -340,6 +486,10 @@ bool decodeCoreLinkFrame(
                                                decoded.type, decoded.message);
             break;
 
+        case CoreLinkMessageType::PAIRING:
+            validPayload = readPairingPacket(input, payloadEnd, offset, decoded);
+            break;
+
         default:
             return false;
     }
@@ -347,6 +497,8 @@ bool decodeCoreLinkFrame(
     if (!validPayload || offset != payloadEnd) {
         return false;
     }
+    if (decoded.type == CoreLinkMessageType::PAIRING &&
+        !validPairingPacket(decoded)) return false;
     packet = decoded;
     return true;
 }

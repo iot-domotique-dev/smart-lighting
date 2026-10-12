@@ -67,6 +67,7 @@ void CoreWifiRuntime::poll() {
             handlePacket(packet);
         }
     }
+    api.pollPairing(millis());
     pollConsole();
     if (registryMutex != nullptr &&
         xSemaphoreTake(registryMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -145,6 +146,10 @@ void CoreWifiRuntime::refreshRegistryStatus(EventBus& eventBus) {
 }
 
 void CoreWifiRuntime::handlePacket(const CoreLinkPacket& packet) {
+    if (packet.type == CoreLinkMessageType::PAIRING) {
+        api.handlePairingPacket(packet);
+        return;
+    }
     if (packet.type == CoreLinkMessageType::COMMAND_RESULT) {
         bool handled = false;
         if (registryMutex != nullptr &&

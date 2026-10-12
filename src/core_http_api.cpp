@@ -7,15 +7,16 @@
 #include <string.h>
 
 #include "core_command_protocol.h"
+#include "core_http_auth.h"
 #include "core_module_service.h"
+#include "esp_random.h"
 #include "esp_app_desc.h"
 #include "esp_timer.h"
 
 namespace {
 constexpr size_t MAX_COMMAND_BODY_BYTES = 64;
+constexpr size_t MAX_PAIRING_BODY_BYTES = 160;
 constexpr size_t MAX_AUTHORIZATION_BYTES = 160;
-constexpr size_t MIN_API_TOKEN_BYTES = 32;
-constexpr size_t MAX_API_TOKEN_BYTES = 128;
 char responseBuffer[CORE_API_MAX_RESPONSE_BYTES];
 
 const char* statusText(uint16_t status) {
@@ -52,6 +53,20 @@ bool parseId(const char* first, const char* last, uint32_t& id) {
 
 enum class CommandRouteKind : uint8_t { NONE, SUBMIT_POWER, STATUS, INVALID };
 
+enum class PairingRouteKind : uint8_t {
+    NONE,
+    SESSION,
+    CANDIDATES,
+    OPERATION_CREATE,
+    OPERATION_STATUS,
+    INVALID
+};
+
+struct PairingRoute {
+    PairingRouteKind kind;
+    uint32_t id;
+};
+
 struct CommandRoute {
     CommandRouteKind kind;
     uint32_t id;
@@ -85,14 +100,180 @@ CommandRoute parseCommandRoute(const char* uri) {
     return {CommandRouteKind::SUBMIT_POWER, id};
 }
 
-bool configuredToken(const char* token) {
-    if (token == nullptr) return false;
-    const size_t length = strlen(token);
-    return length >= MIN_API_TOKEN_BYTES && length <= MAX_API_TOKEN_BYTES;
+PairingRoute parsePairingRoute(const char* uri) {
+    if (uri == nullptr || strncmp(uri, "/api/v1/pairing", 15) != 0)
+        return {PairingRouteKind::NONE, 0};
+    if (strcmp(uri, "/api/v1/pairing/session") == 0)
+        return {PairingRouteKind::SESSION, 0};
+    if (strcmp(uri, "/api/v1/pairing/candidates") == 0)
+        return {PairingRouteKind::CANDIDATES, 0};
+    if (strcmp(uri, "/api/v1/pairing/operations") == 0)
+        return {PairingRouteKind::OPERATION_CREATE, 0};
+    constexpr char OPERATION_PREFIX[] = "/api/v1/pairing/operations/";
+    if (strncmp(uri, OPERATION_PREFIX, sizeof(OPERATION_PREFIX) - 1) == 0) {
+        const char* idStart = uri + sizeof(OPERATION_PREFIX) - 1;
+        const char* idEnd = idStart + strlen(idStart);
+        uint32_t id = 0;
+        if (strchr(idStart, '/') != nullptr || strchr(idStart, '?') != nullptr ||
+            !parseId(idStart, idEnd, id)) return {PairingRouteKind::INVALID, 0};
+        return {PairingRouteKind::OPERATION_STATUS, id};
+    }
+    return {PairingRouteKind::INVALID, 0};
+}
+
+void skipJsonWhitespace(const char*& cursor, const char* end) {
+    while (cursor != end && (*cursor == ' ' || *cursor == '\t' ||
+           *cursor == '\r' || *cursor == '\n')) ++cursor;
+}
+
+bool parseJsonString(const char*& cursor, const char* end,
+                     char* output, size_t capacity) {
+    if (cursor == end || *cursor++ != '"' || capacity == 0) return false;
+    size_t length = 0;
+    while (cursor != end && *cursor != '"') {
+        const unsigned char value = static_cast<unsigned char>(*cursor++);
+        if (value < 0x20 || value >= 0x7f || value == '\\' ||
+            length + 1 >= capacity) return false;
+        output[length++] = static_cast<char>(value);
+    }
+    if (cursor == end || *cursor++ != '"') return false;
+    output[length] = '\0';
+    return true;
+}
+
+bool parseJsonUnsigned(const char*& cursor, const char* end, uint32_t& value) {
+    if (cursor == end || *cursor < '0' || *cursor > '9') return false;
+    uint32_t parsed = 0;
+    do {
+        const uint32_t digit = static_cast<uint32_t>(*cursor++ - '0');
+        if (parsed > (UINT32_MAX - digit) / 10U) return false;
+        parsed = parsed * 10U + digit;
+    } while (cursor != end && *cursor >= '0' && *cursor <= '9');
+    value = parsed;
+    return true;
+}
+
+bool isJsonContentType(httpd_req_t* request);
+
+bool parsePairingBody(httpd_req_t* request, char* body, size_t capacity) {
+    if (request->content_len == 0 || request->content_len >= capacity ||
+        !isJsonContentType(request)) return false;
+    size_t received = 0;
+    while (received < request->content_len) {
+        const int count = httpd_req_recv(request, body + received,
+            request->content_len - received);
+        if (count <= 0) return false;
+        received += static_cast<size_t>(count);
+    }
+    body[received] = '\0';
+    return true;
+}
+
+bool parseSessionBody(const char* body, uint16_t& durationSeconds) {
+    const char* cursor = body;
+    const char* end = body + strlen(body);
+    skipJsonWhitespace(cursor, end);
+    if (cursor == end || *cursor++ != '{') return false;
+    skipJsonWhitespace(cursor, end);
+    char key[32] = {};
+    if (!parseJsonString(cursor, end, key, sizeof(key)) ||
+        strcmp(key, "duration_seconds") != 0) return false;
+    skipJsonWhitespace(cursor, end);
+    if (cursor == end || *cursor++ != ':') return false;
+    skipJsonWhitespace(cursor, end);
+    uint32_t duration = 0;
+    if (!parseJsonUnsigned(cursor, end, duration)) return false;
+    skipJsonWhitespace(cursor, end);
+    if (cursor == end || *cursor++ != '}') return false;
+    skipJsonWhitespace(cursor, end);
+    if (cursor != end || duration < 15 || duration > 180) return false;
+    durationSeconds = static_cast<uint16_t>(duration);
+    return true;
+}
+
+bool parsePairOperationBody(const char* body, uint32_t& sessionId,
+                            uint32_t& operationId,
+                            char* hardwareId, size_t hardwareCapacity,
+                            char* name, size_t nameCapacity) {
+    const char* cursor = body;
+    const char* end = body + strlen(body);
+    bool haveSession = false;
+    bool haveOperation = false;
+    bool haveHardware = false;
+    bool haveName = false;
+    bool closed = false;
+    skipJsonWhitespace(cursor, end);
+    if (cursor == end || *cursor++ != '{') return false;
+    while (cursor != end) {
+        skipJsonWhitespace(cursor, end);
+        if (cursor != end && *cursor == '}') {
+            ++cursor;
+            closed = true;
+            break;
+        }
+        char key[32] = {};
+        if (!parseJsonString(cursor, end, key, sizeof(key))) return false;
+        skipJsonWhitespace(cursor, end);
+        if (cursor == end || *cursor++ != ':') return false;
+        skipJsonWhitespace(cursor, end);
+        if (strcmp(key, "session_id") == 0 && !haveSession) {
+            if (!parseJsonUnsigned(cursor, end, sessionId)) return false;
+            haveSession = true;
+        } else if (strcmp(key, "operation_id") == 0 && !haveOperation) {
+            if (!parseJsonUnsigned(cursor, end, operationId)) return false;
+            haveOperation = true;
+        } else if (strcmp(key, "hardware_id") == 0 && !haveHardware) {
+            if (!parseJsonString(cursor, end, hardwareId, hardwareCapacity)) return false;
+            haveHardware = true;
+        } else if (strcmp(key, "name") == 0 && !haveName) {
+            if (!parseJsonString(cursor, end, name, nameCapacity)) return false;
+            haveName = true;
+        } else {
+            return false;
+        }
+        skipJsonWhitespace(cursor, end);
+        if (cursor != end && *cursor == ',') {
+            ++cursor;
+            skipJsonWhitespace(cursor, end);
+            if (cursor == end || *cursor == '}') return false;
+            continue;
+        }
+        if (cursor != end && *cursor == '}') {
+            ++cursor;
+            closed = true;
+            break;
+        }
+        return false;
+    }
+    skipJsonWhitespace(cursor, end);
+    return cursor == end && closed && haveSession && sessionId != 0 && haveOperation &&
+           operationId != 0 && haveHardware && haveName;
+}
+
+uint32_t makePairingId() {
+    uint32_t id = esp_random();
+    if (id == 0) id = 1;
+    return id;
+}
+
+bool findPairingMain(const DeviceRegistry& registry, const Device*& main,
+                     uint16_t& matches) {
+    main = nullptr;
+    matches = 0;
+    for (uint8_t index = 0; index < registry.count && index < MAX_DEVICES; ++index) {
+        if (registry.devices[index].role == DeviceRole::MAIN) {
+            if (registry.devices[index].parentId != CORE_LOGICAL_ID) {
+                ++matches;
+                continue;
+            }
+            main = &registry.devices[index];
+            ++matches;
+        }
+    }
+    return matches == 1 && main != nullptr && main->localId != 0;
 }
 
 bool authorized(httpd_req_t* request, const char* token) {
-    if (!configuredToken(token)) return false;
     const size_t headerLength = httpd_req_get_hdr_value_len(request, "Authorization");
     if (headerLength == 0 || headerLength >= MAX_AUTHORIZATION_BYTES) return false;
 
@@ -101,19 +282,7 @@ bool authorized(httpd_req_t* request, const char* token) {
                                     sizeof(header)) != ESP_OK) {
         return false;
     }
-    constexpr char PREFIX[] = "Bearer ";
-    constexpr size_t PREFIX_LENGTH = sizeof(PREFIX) - 1;
-    const size_t tokenLength = strlen(token);
-    if (headerLength != PREFIX_LENGTH + tokenLength ||
-        memcmp(header, PREFIX, PREFIX_LENGTH) != 0) {
-        return false;
-    }
-
-    uint8_t difference = 0;
-    for (size_t index = 0; index < tokenLength; ++index) {
-        difference |= static_cast<uint8_t>(header[PREFIX_LENGTH + index] ^ token[index]);
-    }
-    return difference == 0;
+    return coreHttpHasValidBearer(header, headerLength, token);
 }
 
 bool isJsonContentType(httpd_req_t* request) {
@@ -240,7 +409,7 @@ esp_err_t handleCommandRequest(CommandApiContext& api, httpd_req_t* request,
                                const CommandRoute& route) {
     if (route.kind == CommandRouteKind::INVALID)
         return sendError(request, 400, "bad_request", "The command path or ID is invalid.");
-    if (!configuredToken(api.apiToken))
+    if (!coreHttpTokenConfigured(api.apiToken))
         return sendError(request, 503, "command_api_disabled",
                          "Configure a 32 to 128 character API token to enable commands.");
     if (!authorized(request, api.apiToken))
@@ -358,6 +527,355 @@ CoreHttpApi::CoreHttpApi(DeviceRegistry& coreRegistry,
       commands(commandService), tracker(messageTracker), apiToken(commandApiToken),
       registryMutex(&coreRegistryMutex), started(false), server(nullptr) {}
 
+esp_err_t CoreHttpApi::handlePairingRequest(httpd_req_t* request) {
+    const PairingRoute route = parsePairingRoute(request->uri);
+    if (route.kind == PairingRouteKind::INVALID)
+        return sendError(request, 400, "bad_request", "The pairing path or ID is invalid.");
+    if (!coreHttpTokenConfigured(apiToken))
+        return sendError(request, 503, "pairing_api_disabled",
+                         "Configure a valid API token to enable pairing.");
+    if (!authorized(request, apiToken))
+        return sendError(request, 401, "unauthorized", "A valid Bearer token is required.");
+
+    const uint32_t now = millis();
+    pollPairing(now);
+
+    if (route.kind == PairingRouteKind::SESSION) {
+        if (request->method == HTTP_POST) {
+            if (request->content_len > MAX_PAIRING_BODY_BYTES)
+                return sendError(request, 413, "payload_too_large",
+                                 "The pairing request body is too large.");
+            char body[MAX_PAIRING_BODY_BYTES + 1] = {};
+            uint16_t duration = 0;
+            if (!parsePairingBody(request, body, sizeof(body)) ||
+                !parseSessionBody(body, duration)) {
+                return sendError(request, 400, "bad_request",
+                                 "Expected JSON with duration_seconds between 15 and 180.");
+            }
+            if (registryMutex == nullptr || *registryMutex == nullptr ||
+                xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(250)) != pdTRUE)
+                return sendError(request, 503, "core_busy", "The CORE is busy; retry shortly.");
+
+            const Device* main = nullptr;
+            uint16_t mainCount = 0;
+            const bool exactlyOneMain = findPairingMain(registry, main, mainCount);
+            if (!exactlyOneMain || main == nullptr || mainCount != 1) {
+                (void)xSemaphoreGive(*registryMutex);
+                return sendError(request, mainCount > 1 ? 409 : 503,
+                    mainCount > 1 ? "unsupported_topology" : "main_unavailable",
+                    mainCount > 1 ? "Pairing currently supports one MAIN." :
+                                    "No assigned MAIN is available.");
+            }
+            if (main->status != DeviceStatus::ONLINE) {
+                (void)xSemaphoreGive(*registryMutex);
+                return sendError(request, 409, "main_offline",
+                                 "The MAIN must be online to open a pairing session.");
+            }
+
+            const uint32_t sessionId = makePairingId();
+            CoreLinkPacket command = {};
+            command.type = CoreLinkMessageType::PAIRING;
+            command.sequence = static_cast<uint16_t>(sessionId);
+            command.pairingAction = CoreLinkPairingAction::OPEN_SESSION;
+            command.localId = main->localId;
+            command.sessionId = sessionId;
+            command.pairingDurationSeconds = duration;
+            const bool accepted = pairing.beginSession(sessionId, main->localId,
+                                                       duration, now);
+            (void)xSemaphoreGive(*registryMutex);
+            if (!accepted)
+                return sendError(request, 409, "pairing_session_busy",
+                                 "A pairing session or operation is already active.");
+            if (!uart.send(command)) {
+                if (registryMutex != nullptr && *registryMutex != nullptr &&
+                    xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
+                    pairing.failSessionRequest(sessionId, true, millis());
+                    (void)xSemaphoreGive(*registryMutex);
+                }
+                return sendError(request, 503, "pairing_transport_uncertain",
+                                 "The session request could not be confirmed; inspect its status before retrying.");
+            }
+            const int length = snprintf(responseBuffer, sizeof(responseBuffer),
+                "{\"session\":{\"id\":%lu,\"state\":\"opening\",\"duration_seconds\":%u}}",
+                static_cast<unsigned long>(sessionId), static_cast<unsigned>(duration));
+            if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer))
+                return sendError(request, 500, "internal_error", "The response could not be serialized.");
+            return sendJson(request, 202, responseBuffer, static_cast<size_t>(length));
+        }
+        if (request->method == HTTP_GET) {
+            if (registryMutex == nullptr || *registryMutex == nullptr ||
+                xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(250)) != pdTRUE)
+                return sendError(request, 503, "core_busy", "The CORE is busy; retry shortly.");
+            if (pairing.getSessionState() == CorePairingSessionState::NONE) {
+                (void)xSemaphoreGive(*registryMutex);
+                constexpr char EMPTY_SESSION[] = "{\"session\":null}";
+                return sendJson(request, 200, EMPTY_SESSION, sizeof(EMPTY_SESSION) - 1);
+            }
+            const int length = snprintf(responseBuffer, sizeof(responseBuffer),
+                "{\"session\":{\"id\":%lu,\"state\":\"%s\",\"duration_seconds\":%u,\"candidate_count\":%u,\"candidate_limit_reached\":%s}}",
+                static_cast<unsigned long>(pairing.getSessionId()),
+                corePairingSessionStateName(pairing.getSessionState()),
+                static_cast<unsigned>(pairing.getDurationSeconds()),
+                static_cast<unsigned>(pairing.getCandidateCount()),
+                pairing.hasCandidateLimit() ? "true" : "false");
+            (void)xSemaphoreGive(*registryMutex);
+            if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer))
+                return sendError(request, 500, "internal_error", "The response could not be serialized.");
+            return sendJson(request, 200, responseBuffer, static_cast<size_t>(length));
+        }
+        if (request->method == HTTP_DELETE) {
+            if (registryMutex == nullptr || *registryMutex == nullptr ||
+                xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(250)) != pdTRUE)
+                return sendError(request, 503, "core_busy", "The CORE is busy; retry shortly.");
+            const uint32_t sessionId = pairing.getSessionId();
+            const uint32_t mainLocalId = pairing.getMainLocalId();
+            const bool accepted = pairing.beginClose(sessionId, now);
+            (void)xSemaphoreGive(*registryMutex);
+            if (!accepted)
+                return sendError(request, 409, "session_not_closable",
+                                 "No active session can be closed, or a pairing operation is in progress.");
+            CoreLinkPacket command = {};
+            command.type = CoreLinkMessageType::PAIRING;
+            command.sequence = static_cast<uint16_t>(sessionId);
+            command.pairingAction = CoreLinkPairingAction::CLOSE_SESSION;
+            command.localId = mainLocalId;
+            command.sessionId = sessionId;
+            if (!uart.send(command)) {
+                if (registryMutex != nullptr && *registryMutex != nullptr &&
+                    xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
+                    pairing.failSessionRequest(sessionId, true, millis());
+                    (void)xSemaphoreGive(*registryMutex);
+                }
+                return sendError(request, 503, "pairing_transport_uncertain",
+                                 "The close request was not confirmed; inspect session status.");
+            }
+            const int length = snprintf(responseBuffer, sizeof(responseBuffer),
+                "{\"session\":{\"id\":%lu,\"state\":\"closing\"}}",
+                static_cast<unsigned long>(sessionId));
+            if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer))
+                return sendError(request, 500, "internal_error", "The response could not be serialized.");
+            return sendJson(request, 202, responseBuffer, static_cast<size_t>(length));
+        }
+        return sendError(request, 405, "method_not_allowed",
+                         "Use POST, GET, or DELETE for the pairing session.", "POST, GET, DELETE");
+    }
+
+    if (route.kind == PairingRouteKind::CANDIDATES) {
+        if (request->method != HTTP_GET)
+            return sendError(request, 405, "method_not_allowed",
+                             "Use GET to read pairing candidates.", "GET");
+        if (registryMutex == nullptr || *registryMutex == nullptr ||
+            xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(250)) != pdTRUE)
+            return sendError(request, 503, "core_busy", "The CORE is busy; retry shortly.");
+        int length = snprintf(responseBuffer, sizeof(responseBuffer),
+            "{\"session_id\":%lu,\"capacity_reached\":%s,\"candidates\":[",
+            static_cast<unsigned long>(pairing.getSessionId()),
+            pairing.hasCandidateLimit() ? "true" : "false");
+        bool ok = length > 0 && static_cast<size_t>(length) < sizeof(responseBuffer);
+        size_t used = ok ? static_cast<size_t>(length) : 0;
+        for (uint8_t index = 0; ok && index < pairing.getCandidateCount(); ++index) {
+            const CorePairingCandidate* candidate = pairing.getCandidate(index);
+            if (candidate == nullptr) { ok = false; break; }
+            length = snprintf(responseBuffer + used, sizeof(responseBuffer) - used,
+                "%s{\"hardware_id\":\"%s\",\"capabilities\":%lu,\"last_seen_ms\":%lu}",
+                index == 0 ? "" : ",", candidate->hardwareId,
+                static_cast<unsigned long>(candidate->capabilities),
+                static_cast<unsigned long>(candidate->lastSeen));
+            if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer) - used)
+                ok = false;
+            else used += static_cast<size_t>(length);
+        }
+        if (ok) {
+            length = snprintf(responseBuffer + used, sizeof(responseBuffer) - used,
+                              "],\"count\":%u}",
+                              static_cast<unsigned>(pairing.getCandidateCount()));
+            if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer) - used)
+                ok = false;
+            else used += static_cast<size_t>(length);
+        }
+        (void)xSemaphoreGive(*registryMutex);
+        if (!ok) return sendError(request, 500, "internal_error", "The response could not be serialized.");
+        return sendJson(request, 200, responseBuffer, used);
+    }
+
+    if (route.kind == PairingRouteKind::OPERATION_CREATE) {
+        if (request->method != HTTP_POST)
+            return sendError(request, 405, "method_not_allowed",
+                             "Use POST to request pairing.", "POST");
+        if (request->content_len > MAX_PAIRING_BODY_BYTES)
+            return sendError(request, 413, "payload_too_large",
+                             "The pairing request body is too large.");
+        char body[MAX_PAIRING_BODY_BYTES + 1] = {};
+        char hardwareId[32] = {};
+        char name[32] = {};
+        uint32_t requestedSessionId = 0;
+        uint32_t requestedOperationId = 0;
+        if (!parsePairingBody(request, body, sizeof(body)) ||
+            !parsePairOperationBody(body, requestedSessionId,
+                                    requestedOperationId, hardwareId,
+                                    sizeof(hardwareId), name, sizeof(name)) ||
+            !isValidCorePairingHardwareId(hardwareId) ||
+            !isValidCorePairingName(name)) {
+            return sendError(request, 400, "bad_request",
+                "Expected nonzero session_id and operation_id, a C6 hardware_id, and a 1 to 31 character ASCII name.");
+        }
+        if (registryMutex == nullptr || *registryMutex == nullptr ||
+            xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(250)) != pdTRUE)
+            return sendError(request, 503, "core_busy", "The CORE is busy; retry shortly.");
+        if (pairing.getOperationId() == requestedOperationId &&
+            pairing.getOperationState() != CorePairingOperationState::NONE) {
+            const bool sameRequest =
+                pairing.getOperationSessionId() == requestedSessionId &&
+                strcmp(pairing.getOperationHardwareId(), hardwareId) == 0 &&
+                strcmp(pairing.getOperationName(), name) == 0;
+            if (!sameRequest) {
+                (void)xSemaphoreGive(*registryMutex);
+                return sendError(request, 409, "operation_id_conflict",
+                    "This operation_id is already associated with another request.");
+            }
+            const int length = snprintf(responseBuffer, sizeof(responseBuffer),
+                "{\"operation\":{\"id\":%lu,\"session_id\":%lu,\"hardware_id\":\"%s\",\"state\":\"%s\"}}",
+                static_cast<unsigned long>(requestedOperationId),
+                static_cast<unsigned long>(requestedSessionId), hardwareId,
+                corePairingOperationStateName(pairing.getOperationState()));
+            (void)xSemaphoreGive(*registryMutex);
+            if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer))
+                return sendError(request, 500, "internal_error", "The response could not be serialized.");
+            return sendJson(request, 200, responseBuffer, static_cast<size_t>(length));
+        }
+        const uint32_t sessionId = pairing.getSessionId();
+        const uint32_t mainLocalId = pairing.getMainLocalId();
+        const Device* main = nullptr;
+        uint16_t mainCount = 0;
+        (void)findPairingMain(registry, main, mainCount);
+        if (pairing.getSessionState() != CorePairingSessionState::ACTIVE ||
+            requestedSessionId != sessionId) {
+            (void)xSemaphoreGive(*registryMutex);
+            return sendError(request, 409, "session_not_active",
+                             "The requested pairing session is not active.");
+        }
+        if (main == nullptr || mainCount != 1 || main->localId != mainLocalId ||
+            main->status != DeviceStatus::ONLINE) {
+            pairing.markCommunicationLost(now);
+            (void)xSemaphoreGive(*registryMutex);
+            return sendError(request, 409, "main_offline",
+                             "The MAIN is offline; the pairing result is uncertain.");
+        }
+        if (pairing.findCandidate(hardwareId) == nullptr) {
+            (void)xSemaphoreGive(*registryMutex);
+            return sendError(request, 404, "candidate_not_found",
+                             "The candidate is absent or has expired.");
+        }
+        const uint32_t operationId = requestedOperationId;
+        if (!pairing.beginOperation(sessionId, operationId, hardwareId, name, now)) {
+            (void)xSemaphoreGive(*registryMutex);
+            return sendError(request, 409, "pairing_in_progress",
+                             "Another pairing operation is already active.");
+        }
+        (void)xSemaphoreGive(*registryMutex);
+
+        CoreLinkPacket command = {};
+        command.type = CoreLinkMessageType::PAIRING;
+        command.sequence = static_cast<uint16_t>(operationId);
+        command.pairingAction = CoreLinkPairingAction::PAIR_CANDIDATE;
+        command.localId = mainLocalId;
+        command.sessionId = sessionId;
+        command.operationId = operationId;
+        strncpy(command.hardwareId, hardwareId, sizeof(command.hardwareId) - 1);
+        strncpy(command.pairingName, name, sizeof(command.pairingName) - 1);
+        if (!uart.send(command)) {
+            if (registryMutex != nullptr && *registryMutex != nullptr &&
+                xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
+                pairing.failOperationRequest(operationId, millis());
+                (void)xSemaphoreGive(*registryMutex);
+            }
+            return sendError(request, 503, "pairing_transport_uncertain",
+                             "The operation was not confirmed; do not submit it again automatically.");
+        }
+        const int length = snprintf(responseBuffer, sizeof(responseBuffer),
+            "{\"operation\":{\"id\":%lu,\"session_id\":%lu,\"hardware_id\":\"%s\",\"state\":\"pending\"}}",
+            static_cast<unsigned long>(operationId),
+            static_cast<unsigned long>(sessionId), hardwareId);
+        if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer))
+            return sendError(request, 500, "internal_error", "The response could not be serialized.");
+        return sendJson(request, 202, responseBuffer, static_cast<size_t>(length));
+    }
+
+    if (route.kind == PairingRouteKind::OPERATION_STATUS) {
+        if (request->method != HTTP_GET)
+            return sendError(request, 405, "method_not_allowed",
+                             "Use GET to read an operation status.", "GET");
+        if (registryMutex == nullptr || *registryMutex == nullptr ||
+            xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(250)) != pdTRUE)
+            return sendError(request, 503, "core_busy", "The CORE is busy; retry shortly.");
+        if (pairing.getOperationId() != route.id ||
+            pairing.getOperationState() == CorePairingOperationState::NONE) {
+            (void)xSemaphoreGive(*registryMutex);
+            return sendError(request, 404, "operation_not_found",
+                             "The operation is unknown or no longer retained in memory.");
+        }
+        const int length = snprintf(responseBuffer, sizeof(responseBuffer),
+            "{\"operation\":{\"id\":%lu,\"session_id\":%lu,\"hardware_id\":\"%s\",\"name\":\"%s\",\"state\":\"%s\",\"result_code\":\"%s\",\"local_device_id\":%lu}}",
+            static_cast<unsigned long>(pairing.getOperationId()),
+            static_cast<unsigned long>(pairing.getOperationSessionId()),
+            pairing.getOperationHardwareId(), pairing.getOperationName(),
+            corePairingOperationStateName(pairing.getOperationState()),
+            corePairingResultCodeName(pairing.getOperationResult()),
+            static_cast<unsigned long>(pairing.getOperationDeviceId()));
+        (void)xSemaphoreGive(*registryMutex);
+        if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer))
+            return sendError(request, 500, "internal_error", "The response could not be serialized.");
+        return sendJson(request, 200, responseBuffer, static_cast<size_t>(length));
+    }
+
+    return sendError(request, 404, "not_found", "The requested pairing resource was not found.");
+}
+
+void CoreHttpApi::handlePairingPacket(const CoreLinkPacket& packet) {
+    if (packet.type != CoreLinkMessageType::PAIRING ||
+        registryMutex == nullptr || *registryMutex == nullptr ||
+        xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    const uint32_t now = millis();
+    switch (packet.pairingAction) {
+        case CoreLinkPairingAction::CANDIDATE:
+            (void)pairing.addCandidate(packet.sessionId, packet.localId,
+                packet.hardwareId, packet.capabilities, now);
+            break;
+        case CoreLinkPairingAction::SESSION_RESULT:
+            (void)pairing.applySessionResult(packet.sessionId,
+                                             packet.pairingResult, now);
+            break;
+        case CoreLinkPairingAction::OPERATION_RESULT:
+            (void)pairing.applyOperationResult(packet.sessionId,
+                packet.operationId, packet.pairingResult, packet.deviceId,
+                packet.hardwareId, now);
+            break;
+        case CoreLinkPairingAction::CANDIDATE_LIMIT:
+            (void)pairing.markCandidateLimit(packet.sessionId);
+            break;
+        default:
+            break;
+    }
+    (void)xSemaphoreGive(*registryMutex);
+}
+
+void CoreHttpApi::pollPairing(uint32_t now) {
+    if (registryMutex == nullptr || *registryMutex == nullptr ||
+        xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(10)) != pdTRUE) return;
+    pairing.poll(now);
+    const CorePairingSessionState state = pairing.getSessionState();
+    if (state == CorePairingSessionState::OPENING ||
+        state == CorePairingSessionState::ACTIVE ||
+        state == CorePairingSessionState::CLOSING) {
+        const uint32_t mainId = makeCoreModuleId(CORE_LOGICAL_ID,
+                                                 pairing.getMainLocalId());
+        const Device* main = findDeviceById(registry, mainId);
+        if (main == nullptr || main->status != DeviceStatus::ONLINE)
+            pairing.markCommunicationLost(now);
+    }
+    (void)xSemaphoreGive(*registryMutex);
+}
+
 bool CoreHttpApi::begin() {
     if (started) return true;
     if (registryMutex == nullptr || *registryMutex == nullptr) return false;
@@ -394,6 +912,9 @@ bool CoreHttpApi::isReady() const {
 esp_err_t CoreHttpApi::handleRequest(httpd_req_t* request) {
     if (request == nullptr || request->user_ctx == nullptr) return ESP_FAIL;
     CoreHttpApi* api = static_cast<CoreHttpApi*>(request->user_ctx);
+    const PairingRoute pairingRoute = parsePairingRoute(request->uri);
+    if (pairingRoute.kind != PairingRouteKind::NONE)
+        return api->handlePairingRequest(request);
     const CommandRoute commandRoute = parseCommandRoute(request->uri);
     if (commandRoute.kind != CommandRouteKind::NONE) {
         CommandApiContext context{
@@ -466,5 +987,7 @@ CoreHttpApi::CoreHttpApi(DeviceRegistry& coreRegistry,
 
 bool CoreHttpApi::begin() { return false; }
 bool CoreHttpApi::isReady() const { return started; }
+void CoreHttpApi::handlePairingPacket(const CoreLinkPacket&) {}
+void CoreHttpApi::pollPairing(uint32_t) {}
 
 #endif

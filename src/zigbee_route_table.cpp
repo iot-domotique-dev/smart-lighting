@@ -5,6 +5,7 @@
 #include "core_command_protocol.h"
 #include "core_module_service.h"
 #include "core_topology_protocol.h"
+#include "core_pairing_protocol.h"
 
 namespace {
 bool isCoreSender(const Message& message) {
@@ -12,7 +13,9 @@ bool isCoreSender(const Message& message) {
         (isCoreCommandMessage(message) || isCoreCommandReply(message) ||
          (message.type == MessageType::STATE &&
           message.commandType == CORE_TOPOLOGY_ID_ASSIGNED &&
-          message.deviceRole == static_cast<uint8_t>(DeviceRole::CORE)));
+          message.deviceRole == static_cast<uint8_t>(DeviceRole::CORE)) ||
+        (message.type == MessageType::STATE &&
+         message.commandType == CORE_PAIRING_CONTROL_MESSAGE));
 }
 
 bool isCoreDestination(const Message& message) {
@@ -20,7 +23,13 @@ bool isCoreDestination(const Message& message) {
         (message.type == MessageType::STATE &&
          message.commandType == CORE_TOPOLOGY_ID_ACK &&
          message.deviceRole == static_cast<uint8_t>(DeviceRole::MAIN) &&
-         message.destinationId == CORE_LOGICAL_ID);
+         message.destinationId == CORE_LOGICAL_ID) ||
+        (message.type == MessageType::STATE &&
+         message.destinationId == CORE_LOGICAL_ID &&
+         (message.commandType == CORE_PAIRING_CANDIDATE_MESSAGE ||
+          message.commandType == CORE_PAIRING_SESSION_RESULT_MESSAGE ||
+          message.commandType == CORE_PAIRING_OPERATION_RESULT_MESSAGE ||
+          message.commandType == CORE_PAIRING_CANDIDATE_LIMIT_MESSAGE));
 }
 }
 

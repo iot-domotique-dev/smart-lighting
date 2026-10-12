@@ -81,6 +81,7 @@ ProvisioningLamp::ProvisioningLamp(
       store(storeValue),
       pairingState(PairingState::UNPAIRED),
       pendingMainId(0),
+      pendingStartedAt(0),
       hasPendingRequest(false) {
     memset(&configuration, 0, sizeof(configuration));
     copyText(hardwareId, sizeof(hardwareId), hardwareIdValue);
@@ -117,6 +118,7 @@ bool ProvisioningLamp::handlePairRequest(
     const ProvisioningPacket& request,
     ProvisioningPacket& rejection
 ) {
+    expirePendingRequest(millis());
     rejection = {};
     rejection.type = ProvisioningPacketType::PAIR_REJECT;
     rejection.role = DeviceRole::LAMP;
@@ -135,6 +137,9 @@ bool ProvisioningLamp::handlePairRequest(
         return false;
     }
 
+    if (!hasPendingRequest) {
+        pendingStartedAt = millis();
+    }
     pairingState = PairingState::PAIRING;
     hasPendingRequest = true;
     pendingMainId = request.parentMainId;
@@ -145,6 +150,7 @@ bool ProvisioningLamp::handlePairAccept(
     const ProvisioningPacket& acceptance,
     ProvisioningPacket& confirmation
 ) {
+    expirePendingRequest(millis());
     confirmation = {};
     confirmation.type = ProvisioningPacketType::PAIR_CONFIRM;
     confirmation.role = DeviceRole::LAMP;
@@ -198,15 +204,42 @@ PairingState ProvisioningLamp::state() const {
     return pairingState;
 }
 
-MainProvisioning::MainProvisioning(uint32_t mainIdValue, LampRegistry& registryValue)
+void ProvisioningLamp::expirePendingRequest(uint32_t now) {
+    if (!hasPendingRequest ||
+        static_cast<uint32_t>(now - pendingStartedAt) <
+            PROVISIONING_TRANSACTION_TIMEOUT_MS) {
+        return;
+    }
+    hasPendingRequest = false;
+    pendingMainId = 0;
+    pendingStartedAt = 0;
+    pairingState = PairingState::UNPAIRED;
+}
+
+MainProvisioning::MainProvisioning(
+    uint32_t mainIdValue,
+    LampRegistry& registryValue,
+    ProvisioningReservationStore* reservationStoreValue
+)
     : mainId(mainIdValue),
       registry(registryValue),
+      reservationStore(reservationStoreValue),
+      reservationStoreReady(false),
       discoveredCount(0),
       commissioningEnabled(false),
       hasPendingPairing(false),
-      pendingDeviceId(0) {
+      pendingDeviceId(0),
+      pendingStartedAt(0) {
+    initializeMainProvisioningReservationState(mainId, reservationState);
+    if (reservationStore != nullptr &&
+        reservationStore->load(mainId, reservationState) &&
+        isValidMainProvisioningReservationState(reservationState, mainId)) {
+        reservationStoreReady = true;
+    }
     memset(discovered, 0, sizeof(discovered));
+    memset(discoveredAt, 0, sizeof(discoveredAt));
     pendingHardwareId[0] = '\0';
+    pendingName[0] = '\0';
 }
 
 void MainProvisioning::startCommissioning() {
@@ -225,6 +258,80 @@ uint8_t MainProvisioning::detectedCount() const {
     return discoveredCount;
 }
 
+bool MainProvisioning::hasUnpairedCandidate(const char* hardwareIdValue) const {
+    if (hardwareIdValue == nullptr || hardwareIdValue[0] == '\0') return false;
+    const int8_t index = findDiscovered(hardwareIdValue);
+    return index >= 0 &&
+        discovered[index].pairingState == PairingState::UNPAIRED;
+}
+
+bool MainProvisioning::canPairCandidate(const char* hardwareIdValue) const {
+    if (!reservationStoreReady || !commissioningEnabled || hasPendingPairing ||
+        hardwareIdValue == nullptr || hardwareIdValue[0] == '\0' ||
+        pairingCapacityReached(hardwareIdValue)) return false;
+    const int8_t index = findDiscovered(hardwareIdValue);
+    if (index < 0 || discovered[index].pairingState != PairingState::UNPAIRED ||
+        findLampByHardwareId(registry, hardwareIdValue) != nullptr ||
+        findAvailableDeviceId() == 0) return false;
+    return true;
+}
+
+bool MainProvisioning::pairingCapacityReached(
+    const char* hardwareIdValue
+) const {
+    if (!reservationStoreReady || hardwareIdValue == nullptr ||
+        hardwareIdValue[0] == '\0') return false;
+    if (registry.count >= MAX_LAMPS || findAvailableDeviceId() == 0) return true;
+    return findReservationByHardwareId(hardwareIdValue) < 0 &&
+           reservationState.count >= MAX_LAMPS;
+}
+
+void MainProvisioning::expireUnpairedCandidates(uint32_t now) {
+    for (uint8_t index = 0; index < discoveredCount;) {
+        if (discovered[index].pairingState == PairingState::PAIRED ||
+            now - discoveredAt[index] <= PROVISIONING_TRANSACTION_TIMEOUT_MS) {
+            ++index;
+            continue;
+        }
+        for (uint8_t move = index; move + 1 < discoveredCount; ++move) {
+            discovered[move] = discovered[move + 1];
+            discoveredAt[move] = discoveredAt[move + 1];
+        }
+        --discoveredCount;
+        discovered[discoveredCount] = {};
+        discoveredAt[discoveredCount] = 0;
+    }
+}
+
+void MainProvisioning::clearUnpairedCandidates() {
+    for (uint8_t index = 0; index < discoveredCount;) {
+        if (discovered[index].pairingState == PairingState::PAIRED) {
+            ++index;
+            continue;
+        }
+        for (uint8_t move = index; move + 1 < discoveredCount; ++move) {
+            discovered[move] = discovered[move + 1];
+            discoveredAt[move] = discoveredAt[move + 1];
+        }
+        --discoveredCount;
+        discovered[discoveredCount] = {};
+        discoveredAt[discoveredCount] = 0;
+    }
+}
+
+void MainProvisioning::expirePendingPairing(uint32_t now) {
+    if (!hasPendingPairing ||
+        static_cast<uint32_t>(now - pendingStartedAt) <
+            PROVISIONING_TRANSACTION_TIMEOUT_MS) {
+        return;
+    }
+    clearPendingPairing(true);
+}
+
+void MainProvisioning::abortPendingPairing() {
+    clearPendingPairing(true);
+}
+
 int8_t MainProvisioning::findDiscovered(const char* hardwareIdValue) const {
     for (uint8_t i = 0; i < discoveredCount; ++i) {
         if (sameText(discovered[i].hardwareId, hardwareIdValue)) {
@@ -234,8 +341,32 @@ int8_t MainProvisioning::findDiscovered(const char* hardwareIdValue) const {
     return -1;
 }
 
+int8_t MainProvisioning::findReservationByHardwareId(
+    const char* hardwareIdValue
+) const {
+    for (uint8_t i = 0; i < reservationState.count; ++i) {
+        if (sameText(reservationState.identities[i].hardwareId, hardwareIdValue)) {
+            return static_cast<int8_t>(i);
+        }
+    }
+    return -1;
+}
+
+int8_t MainProvisioning::findReservationByDeviceId(uint32_t deviceId) const {
+    for (uint8_t i = 0; i < reservationState.count; ++i) {
+        if (reservationState.identities[i].deviceId == deviceId) {
+            return static_cast<int8_t>(i);
+        }
+    }
+    return -1;
+}
+
 uint32_t MainProvisioning::findAvailableDeviceId() const {
-    for (uint32_t candidate = 1; candidate != 0; ++candidate) {
+    if (!reservationStoreReady || reservationState.highWaterDeviceId == UINT32_MAX) {
+        return 0;
+    }
+    for (uint32_t candidate = reservationState.highWaterDeviceId + 1;
+         candidate != 0; ++candidate) {
         bool reservedByDiscoveredPairedDevice = false;
         for (uint8_t i = 0; i < discoveredCount; ++i) {
             if (discovered[i].pairingState == PairingState::PAIRED &&
@@ -252,15 +383,77 @@ uint32_t MainProvisioning::findAvailableDeviceId() const {
     return 0;
 }
 
-void MainProvisioning::clearPendingPairing() {
+bool MainProvisioning::saveReservationState(
+    const MainProvisioningReservationState& state
+) {
+    if (!reservationStoreReady || reservationStore == nullptr ||
+        !isValidMainProvisioningReservationState(state, mainId)) {
+        return false;
+    }
+    if (!reservationStore->save(state)) {
+        reservationStoreReady = false;
+        return false;
+    }
+    reservationState = state;
+    return true;
+}
+
+bool MainProvisioning::recordPairedIdentity(
+    const ProvisioningPacket& announcement
+) {
+    if (!reservationStoreReady) {
+        // Legacy V7 pairings can still be restored; new pairings stay disabled.
+        return announcement.deviceId <= MAX_LAMPS;
+    }
+
+    const int8_t byHardware =
+        findReservationByHardwareId(announcement.hardwareId);
+    const int8_t byId = findReservationByDeviceId(announcement.deviceId);
+    if (byHardware >= 0) {
+        return reservationState.identities[byHardware].deviceId ==
+                   announcement.deviceId &&
+               (byId < 0 || byId == byHardware);
+    }
+    if (byId >= 0 || announcement.deviceId > reservationState.highWaterDeviceId) {
+        // An ID above the legacy range must have been reserved before PAIR_ACCEPT.
+        return false;
+    }
+    if (announcement.deviceId > MAX_LAMPS ||
+        reservationState.count >= MAX_LAMPS) {
+        return false;
+    }
+
+    MainProvisioningReservationState next = reservationState;
+    ProvisioningIdentityReservation& identity = next.identities[next.count++];
+    identity.deviceId = announcement.deviceId;
+    copyText(identity.hardwareId, sizeof(identity.hardwareId),
+             announcement.hardwareId);
+    if (!saveReservationState(next)) {
+        // Do not block a known legacy lamp, but disable future ID allocations.
+        reservationStoreReady = false;
+    }
+    return true;
+}
+
+void MainProvisioning::clearPendingPairing(bool requireFreshAnnouncement) {
+    if (requireFreshAnnouncement && pendingHardwareId[0] != '\0') {
+        const int8_t index = findDiscovered(pendingHardwareId);
+        if (index >= 0 &&
+            discovered[index].pairingState == PairingState::UNPAIRED) {
+            discovered[index].pairingState = PairingState::PAIRING;
+        }
+    }
     hasPendingPairing = false;
     pendingHardwareId[0] = '\0';
+    pendingName[0] = '\0';
     pendingDeviceId = 0;
+    pendingStartedAt = 0;
 }
 
 DiscoveryResult MainProvisioning::discover(
     const ProvisioningPacket& announcement
 ) {
+    expireUnpairedCandidates(millis());
     if (announcement.type != ProvisioningPacketType::DEVICE_ANNOUNCE ||
         announcement.role != DeviceRole::LAMP ||
         announcement.hardwareId[0] == '\0' ||
@@ -269,16 +462,22 @@ DiscoveryResult MainProvisioning::discover(
          announcement.pairingState != PairingState::PAIRED)) {
         return DiscoveryResult::INVALID_ANNOUNCEMENT;
     }
+    if (announcement.pairingState == PairingState::PAIRED &&
+        (announcement.deviceId == 0 || announcement.parentMainId == 0)) {
+        return DiscoveryResult::INVALID_ANNOUNCEMENT;
+    }
 
     const int8_t previousIndex = findDiscovered(announcement.hardwareId);
     const bool duplicate = previousIndex >= 0;
     if (!duplicate) {
         if (discoveredCount >= MAX_DISCOVERED_LAMPS) {
-            return DiscoveryResult::IDENTITY_CONFLICT;
+            return DiscoveryResult::CANDIDATE_CAPACITY;
         }
         discovered[discoveredCount++] = announcement;
+        discoveredAt[discoveredCount - 1] = millis();
     } else {
         discovered[previousIndex] = announcement;
+        discoveredAt[previousIndex] = millis();
     }
 
     if (announcement.pairingState != PairingState::PAIRED) {
@@ -287,11 +486,11 @@ DiscoveryResult MainProvisioning::discover(
             : DiscoveryResult::DISCOVERED_UNPAIRED;
     }
 
-    if (announcement.deviceId == 0 || announcement.parentMainId == 0) {
-        return DiscoveryResult::INVALID_ANNOUNCEMENT;
-    }
     if (announcement.parentMainId != mainId) {
         return DiscoveryResult::DISCOVERED_OTHER_MAIN;
+    }
+    if (!recordPairedIdentity(announcement)) {
+        return DiscoveryResult::IDENTITY_CONFLICT;
     }
 
     Lamp* byHardwareId = findLampByHardwareId(registry, announcement.hardwareId);
@@ -312,7 +511,7 @@ DiscoveryResult MainProvisioning::discover(
     restored.device.name = "LAMP";
     restored.device.role = DeviceRole::LAMP;
     restored.device.status = DeviceStatus::ONLINE;
-    restored.device.lastSeen = 0;
+    restored.device.lastSeen = millis();
     restored.state = {false, 0, false};
     copyText(restored.identity.hardwareId, sizeof(restored.identity.hardwareId),
              announcement.hardwareId);
@@ -330,15 +529,13 @@ bool MainProvisioning::createPairRequest(
     const char* hardwareIdValue,
     ProvisioningPacket& request
 ) {
-    if (!commissioningEnabled || hasPendingPairing ||
+    expirePendingPairing(millis());
+    if (!reservationStoreReady || !commissioningEnabled || hasPendingPairing ||
         hardwareIdValue == nullptr || hardwareIdValue[0] == '\0') {
         return false;
     }
     const int8_t index = findDiscovered(hardwareIdValue);
-    if (index < 0 || discovered[index].pairingState != PairingState::UNPAIRED ||
-        findLampByHardwareId(registry, hardwareIdValue) != nullptr) {
-        return false;
-    }
+    if (index < 0 || !canPairCandidate(hardwareIdValue)) return false;
 
     request = {};
     request.type = ProvisioningPacketType::PAIR_REQUEST;
@@ -346,7 +543,9 @@ bool MainProvisioning::createPairRequest(
     request.parentMainId = mainId;
     copyText(request.hardwareId, sizeof(request.hardwareId), hardwareIdValue);
     copyText(pendingHardwareId, sizeof(pendingHardwareId), hardwareIdValue);
+    pendingName[0] = '\0';
     pendingDeviceId = 0;
+    pendingStartedAt = millis();
     hasPendingPairing = true;
     return true;
 }
@@ -356,7 +555,9 @@ bool MainProvisioning::createPairAcceptance(
     const char* requestedName,
     ProvisioningPacket& acceptance
 ) {
-    if (!commissioningEnabled || !hasPendingPairing ||
+    expirePendingPairing(millis());
+    if (!reservationStoreReady || !commissioningEnabled || !hasPendingPairing ||
+        pendingDeviceId != 0 ||
         !sameText(pendingHardwareId, hardwareIdValue)) {
         return false;
     }
@@ -365,6 +566,29 @@ bool MainProvisioning::createPairAcceptance(
     if (assignedId == 0) {
         return false;
     }
+
+    MainProvisioningReservationState next = reservationState;
+    const int8_t identityIndex = findReservationByHardwareId(pendingHardwareId);
+    ProvisioningIdentityReservation* identity = nullptr;
+    if (identityIndex >= 0) {
+        identity = &next.identities[identityIndex];
+    } else {
+        if (next.count >= MAX_LAMPS) {
+            clearPendingPairing(true);
+            return false;
+        }
+        identity = &next.identities[next.count++];
+        memset(identity, 0, sizeof(*identity));
+        copyText(identity->hardwareId, sizeof(identity->hardwareId),
+                 pendingHardwareId);
+    }
+    identity->deviceId = assignedId;
+    next.highWaterDeviceId = assignedId;
+    if (!saveReservationState(next)) {
+        clearPendingPairing(true);
+        return false;
+    }
+
     acceptance = {};
     acceptance.type = ProvisioningPacketType::PAIR_ACCEPT;
     acceptance.role = DeviceRole::MAIN;
@@ -376,6 +600,7 @@ bool MainProvisioning::createPairAcceptance(
     if (acceptance.name[0] == '\0') {
         copyText(acceptance.name, sizeof(acceptance.name), "LAMP");
     }
+    copyText(pendingName, sizeof(pendingName), acceptance.name);
     pendingDeviceId = assignedId;
     return true;
 }
@@ -383,11 +608,13 @@ bool MainProvisioning::createPairAcceptance(
 bool MainProvisioning::confirmPairing(
     const ProvisioningPacket& confirmation
 ) {
+    expirePendingPairing(millis());
     if (!hasPendingPairing || pendingDeviceId == 0 ||
         confirmation.type != ProvisioningPacketType::PAIR_CONFIRM ||
         confirmation.role != DeviceRole::LAMP ||
         confirmation.pairingState != PairingState::PAIRED ||
         !sameText(confirmation.hardwareId, pendingHardwareId) ||
+        !sameText(confirmation.name, pendingName) ||
         confirmation.deviceId != pendingDeviceId ||
         confirmation.parentMainId != mainId) {
         return false;
@@ -398,7 +625,7 @@ bool MainProvisioning::confirmPairing(
     paired.device.name = "LAMP";
     paired.device.role = DeviceRole::LAMP;
     paired.device.status = DeviceStatus::ONLINE;
-    paired.device.lastSeen = 0;
+    paired.device.lastSeen = millis();
     paired.state = {false, 0, false};
     copyText(paired.identity.hardwareId, sizeof(paired.identity.hardwareId),
              confirmation.hardwareId);
@@ -409,7 +636,12 @@ bool MainProvisioning::confirmPairing(
     if (!addLamp(registry, paired)) {
         return false;
     }
-    clearPendingPairing();
+    const int8_t discoveredIndex = findDiscovered(confirmation.hardwareId);
+    if (discoveredIndex >= 0) {
+        discovered[discoveredIndex] = confirmation;
+        discoveredAt[discoveredIndex] = millis();
+    }
+    clearPendingPairing(false);
     return true;
 }
 

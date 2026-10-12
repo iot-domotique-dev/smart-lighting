@@ -9,3 +9,13 @@ public:
     bool save(const ProvisioningRecord& record) override;
     bool clear() override;
 };
+
+/* Separate additive NVS namespace used only by MAIN ID allocation. */
+class NvsProvisioningReservationStore : public ProvisioningReservationStore {
+public:
+    bool load(
+        uint32_t mainId,
+        MainProvisioningReservationState& state
+    ) const override;
+    bool save(const MainProvisioningReservationState& state) override;
+};

@@ -7,7 +7,7 @@
 
 constexpr uint8_t CORE_LINK_PROTOCOL_VERSION = 1;
 constexpr size_t CORE_LINK_MAX_NAME_LENGTH = 31;
-constexpr size_t CORE_LINK_MAX_PAYLOAD_SIZE = 46;
+constexpr size_t CORE_LINK_MAX_PAYLOAD_SIZE = 80;
 constexpr size_t CORE_LINK_HEADER_SIZE = 8;
 constexpr size_t CORE_LINK_CRC_SIZE = 2;
 constexpr size_t CORE_LINK_MAX_FRAME_SIZE =
@@ -21,7 +21,35 @@ enum class CoreLinkMessageType : uint8_t {
     STATE = 5,
     ERROR = 6,
     COMMAND = 7,
-    COMMAND_RESULT = 8
+    COMMAND_RESULT = 8,
+    PAIRING = 9
+};
+
+enum class CoreLinkPairingAction : uint8_t {
+    NONE = 0,
+    OPEN_SESSION = 1,
+    CLOSE_SESSION = 2,
+    CANDIDATE = 3,
+    PAIR_CANDIDATE = 4,
+    SESSION_RESULT = 5,
+    OPERATION_RESULT = 6,
+    CANDIDATE_LIMIT = 7
+};
+
+enum class CorePairingResultCode : uint8_t {
+    NONE = 0,
+    ACTIVE = 1,
+    CLOSED = 2,
+    EXPIRED = 3,
+    FAILED = 4,
+    UNCERTAIN = 5,
+    BUSY = 6,
+    PROCESSING = 7,
+    SUCCEEDED = 8,
+    REJECTED = 9,
+    CAPACITY = 10,
+    NOT_FOUND = 11,
+    ROUTE_UNAVAILABLE = 12
 };
 
 struct CoreLinkPacket {
@@ -38,6 +66,15 @@ struct CoreLinkPacket {
     char name[CORE_LINK_MAX_NAME_LENGTH + 1];
     /* V7.2 uses the existing Message model inside the UART framing. */
     Message message;
+    /* Bounded V7.6.3 pairing control and status fields. */
+    CoreLinkPairingAction pairingAction;
+    CorePairingResultCode pairingResult;
+    uint16_t pairingDurationSeconds;
+    uint32_t sessionId;
+    uint32_t operationId;
+    uint32_t deviceId;
+    char hardwareId[32];
+    char pairingName[32];
 };
 
 /* Encodes explicit fields into a versioned frame; never serializes the struct. */

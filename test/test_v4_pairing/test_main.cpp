@@ -1,16 +1,18 @@
 #include <unity.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "provisioning.h"
 #include "simulation_transport.h"
 
-extern "C" void setUp(void) {}
+FakeHardwareSerial Serial;
+static uint32_t fakeMillis = 0;
+
+extern "C" void setUp(void) { fakeMillis = 0; }
 extern "C" void tearDown(void) {}
 
-FakeHardwareSerial Serial;
-
 uint32_t millis() {
-    return 0;
+    return fakeMillis;
 }
 
 bool receiveMessage(Communication&, Message&) {
@@ -40,6 +42,41 @@ static bool completePairing(
     }
     return true;
 }
+
+static void savePairedLampRecord(
+    MemoryProvisioningStore& storage,
+    const char* hardwareId,
+    uint32_t deviceId,
+    uint32_t mainId
+) {
+    ProvisioningRecord record = {};
+    record.deviceId = deviceId;
+    strncpy(record.hardwareId, hardwareId, sizeof(record.hardwareId) - 1);
+    strncpy(record.name, "LAMP", sizeof(record.name) - 1);
+    record.parentMainId = mainId;
+    record.pairingState = PairingState::PAIRED;
+    TEST_ASSERT_TRUE(storage.save(record));
+}
+
+class CorruptProvisioningReservationStore : public ProvisioningReservationStore {
+public:
+    bool load(
+        uint32_t mainId,
+        MainProvisioningReservationState& state
+    ) const override {
+        initializeMainProvisioningReservationState(mainId, state);
+        state.count = 1;
+        state.identities[0].deviceId = 11;
+        strncpy(state.identities[0].hardwareId, "HW-CORRUPT",
+                sizeof(state.identities[0].hardwareId) - 1);
+        // The reservation lies above its watermark and must fail validation.
+        return true;
+    }
+
+    bool save(const MainProvisioningReservationState&) override {
+        return false;
+    }
+};
 
 void test_unconfigured_lamp_announces_identity_through_simulation_transport() {
     MemoryProvisioningStore storage;
@@ -75,7 +112,8 @@ void test_unconfigured_lamp_announces_identity_through_simulation_transport() {
 void test_discovery_does_not_automatically_pair_lamp() {
     LampRegistry registry;
     initLampRegistry(registry);
-    MainProvisioning main(10, registry);
+    MemoryProvisioningReservationStore reservations;
+    MainProvisioning main(10, registry, &reservations);
     MemoryProvisioningStore storage;
     ProvisioningLamp lamp("HW-1", "0.4.0", 0, storage);
 
@@ -92,7 +130,8 @@ void test_discovery_does_not_automatically_pair_lamp() {
 void test_explicit_commissioning_is_required_before_pair_request() {
     LampRegistry registry;
     initLampRegistry(registry);
-    MainProvisioning main(10, registry);
+    MemoryProvisioningReservationStore reservations;
+    MainProvisioning main(10, registry, &reservations);
     MemoryProvisioningStore storage;
     ProvisioningLamp lamp("HW-2", "0.4.0", 0, storage);
     ProvisioningPacket request = {};
@@ -114,7 +153,8 @@ void test_main_assigns_an_available_device_id() {
     existing.device.status = DeviceStatus::ONLINE;
     TEST_ASSERT_TRUE(addLamp(registry, existing));
 
-    MainProvisioning main(10, registry);
+    MemoryProvisioningReservationStore reservations;
+    MainProvisioning main(10, registry, &reservations);
     MemoryProvisioningStore storage;
     ProvisioningLamp lamp("HW-3", "0.4.0", 0, storage);
     main.discover(lamp.announce());
@@ -122,14 +162,15 @@ void test_main_assigns_an_available_device_id() {
     ProvisioningPacket confirmation = {};
     TEST_ASSERT_TRUE(completePairing(main, lamp, "HW-3", "LAMP", confirmation));
 
-    TEST_ASSERT_EQUAL_UINT32(2, confirmation.deviceId);
+    TEST_ASSERT_EQUAL_UINT32(11, confirmation.deviceId);
     TEST_ASSERT_NOT_EQUAL(1, confirmation.deviceId);
 }
 
 void test_main_assigns_parent_main_id() {
     LampRegistry registry;
     initLampRegistry(registry);
-    MainProvisioning main(17, registry);
+    MemoryProvisioningReservationStore reservations;
+    MainProvisioning main(17, registry, &reservations);
     MemoryProvisioningStore storage;
     ProvisioningLamp lamp("HW-4", "0.4.0", 0, storage);
     main.discover(lamp.announce());
@@ -145,7 +186,8 @@ void test_main_assigns_parent_main_id() {
 void test_lamp_returns_pair_confirm_after_acceptance() {
     LampRegistry registry;
     initLampRegistry(registry);
-    MainProvisioning main(10, registry);
+    MemoryProvisioningReservationStore reservations;
+    MainProvisioning main(10, registry, &reservations);
     MemoryProvisioningStore storage;
     ProvisioningLamp lamp("HW-5", "0.4.0", 0, storage);
     main.discover(lamp.announce());
@@ -168,7 +210,8 @@ void test_lamp_returns_pair_confirm_after_acceptance() {
 void test_lamp_is_paired_only_after_persisting_acceptance_and_main_confirmation() {
     LampRegistry registry;
     initLampRegistry(registry);
-    MainProvisioning main(10, registry);
+    MemoryProvisioningReservationStore reservations;
+    MainProvisioning main(10, registry, &reservations);
     MemoryProvisioningStore storage;
     ProvisioningLamp lamp("HW-6", "0.4.0", 0, storage);
     main.discover(lamp.announce());
@@ -201,7 +244,8 @@ void test_lamp_is_paired_only_after_persisting_acceptance_and_main_confirmation(
 void test_two_lamps_receive_different_device_ids() {
     LampRegistry registry;
     initLampRegistry(registry);
-    MainProvisioning main(10, registry);
+    MemoryProvisioningReservationStore reservations;
+    MainProvisioning main(10, registry, &reservations);
     MemoryProvisioningStore firstStorage;
     MemoryProvisioningStore secondStorage;
     ProvisioningLamp first("HW-7A", "0.4.0", 0, firstStorage);
@@ -221,7 +265,8 @@ void test_two_lamps_receive_different_device_ids() {
 void test_repeated_hardware_announcement_does_not_duplicate_registry_entry() {
     LampRegistry registry;
     initLampRegistry(registry);
-    MainProvisioning main(10, registry);
+    MemoryProvisioningReservationStore reservations;
+    MainProvisioning main(10, registry, &reservations);
     MemoryProvisioningStore storage;
     ProvisioningLamp lamp("HW-8", "0.4.0", 0, storage);
     main.discover(lamp.announce());
@@ -240,7 +285,8 @@ void test_repeated_hardware_announcement_does_not_duplicate_registry_entry() {
 void test_paired_lamp_is_recognized_after_main_restart_without_new_id() {
     LampRegistry firstRegistry;
     initLampRegistry(firstRegistry);
-    MainProvisioning firstMain(10, firstRegistry);
+    MemoryProvisioningReservationStore reservations;
+    MainProvisioning firstMain(10, firstRegistry, &reservations);
     MemoryProvisioningStore storage;
     ProvisioningLamp firstBoot("HW-9", "0.4.0", 0, storage);
     firstMain.discover(firstBoot.announce());
@@ -251,7 +297,7 @@ void test_paired_lamp_is_recognized_after_main_restart_without_new_id() {
     ProvisioningLamp rebootedLamp("HW-9", "0.4.0", 0, storage);
     LampRegistry restartedRegistry;
     initLampRegistry(restartedRegistry);
-    MainProvisioning restartedMain(10, restartedRegistry);
+    MainProvisioning restartedMain(10, restartedRegistry, &reservations);
     ProvisioningPacket rebootAnnouncement = rebootedLamp.announce();
     TEST_ASSERT_EQUAL_INT(static_cast<int>(PairingState::PAIRED),
                           static_cast<int>(rebootAnnouncement.pairingState));
@@ -266,7 +312,8 @@ void test_paired_lamp_is_recognized_after_main_restart_without_new_id() {
 void test_paired_lamp_cannot_be_assigned_to_a_second_main() {
     LampRegistry firstRegistry;
     initLampRegistry(firstRegistry);
-    MainProvisioning firstMain(10, firstRegistry);
+    MemoryProvisioningReservationStore firstReservations;
+    MainProvisioning firstMain(10, firstRegistry, &firstReservations);
     MemoryProvisioningStore storage;
     ProvisioningLamp lamp("HW-10", "0.4.0", 0, storage);
     firstMain.discover(lamp.announce());
@@ -276,7 +323,8 @@ void test_paired_lamp_cannot_be_assigned_to_a_second_main() {
 
     LampRegistry secondRegistry;
     initLampRegistry(secondRegistry);
-    MainProvisioning secondMain(11, secondRegistry);
+    MemoryProvisioningReservationStore secondReservations;
+    MainProvisioning secondMain(11, secondRegistry, &secondReservations);
     secondMain.discover(lamp.announce());
     secondMain.startCommissioning();
     ProvisioningPacket request = {};
@@ -298,8 +346,10 @@ void test_two_mains_can_discover_but_only_commissioning_main_can_pair() {
     LampRegistry secondRegistry;
     initLampRegistry(firstRegistry);
     initLampRegistry(secondRegistry);
-    MainProvisioning firstMain(20, firstRegistry);
-    MainProvisioning secondMain(21, secondRegistry);
+    MemoryProvisioningReservationStore firstReservations;
+    MemoryProvisioningReservationStore secondReservations;
+    MainProvisioning firstMain(20, firstRegistry, &firstReservations);
+    MainProvisioning secondMain(21, secondRegistry, &secondReservations);
     MemoryProvisioningStore storage;
     ProvisioningLamp lamp("HW-11", "0.4.0", 0, storage);
     ProvisioningPacket announcement = lamp.announce();
@@ -327,7 +377,8 @@ void test_two_mains_can_discover_but_only_commissioning_main_can_pair() {
 void test_registry_finds_provisioned_lamp_by_hardware_id() {
     LampRegistry registry;
     initLampRegistry(registry);
-    MainProvisioning main(30, registry);
+    MemoryProvisioningReservationStore reservations;
+    MainProvisioning main(30, registry, &reservations);
     MemoryProvisioningStore storage;
     ProvisioningLamp lamp("HW-12", "0.4.0", 0, storage);
     main.discover(lamp.announce());
@@ -354,7 +405,8 @@ void test_registry_finds_provisioned_lamp_by_hardware_id() {
 void test_registry_finds_lamps_by_parent_main_id() {
     LampRegistry registry;
     initLampRegistry(registry);
-    MainProvisioning main(31, registry);
+    MemoryProvisioningReservationStore reservations;
+    MainProvisioning main(31, registry, &reservations);
     MemoryProvisioningStore firstStorage;
     MemoryProvisioningStore secondStorage;
     ProvisioningLamp first("HW-13A", "0.4.0", 0, firstStorage);
@@ -375,6 +427,390 @@ void test_registry_finds_lamps_by_parent_main_id() {
         findLampsByParentMainId(registry, 99, matches, MAX_LAMPS));
 }
 
+void test_upgrade_reserves_legacy_ids_while_old_lamp_is_absent() {
+    MemoryProvisioningStore legacyLampStorage;
+    savePairedLampRecord(legacyLampStorage, "HW-LEGACY", 1, 40);
+    ProvisioningLamp legacyLamp("HW-LEGACY", "0.4.0", 0, legacyLampStorage);
+
+    MemoryProvisioningReservationStore reservations;
+    LampRegistry registry;
+    initLampRegistry(registry);
+    MainProvisioning main(40, registry, &reservations);
+    MemoryProvisioningStore newLampStorage;
+    ProvisioningLamp newLamp("HW-NEW", "0.4.0", 0, newLampStorage);
+
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::DISCOVERED_UNPAIRED),
+                          static_cast<int>(main.discover(newLamp.announce())));
+    main.startCommissioning();
+    ProvisioningPacket newPair = {};
+    TEST_ASSERT_TRUE(completePairing(main, newLamp, "HW-NEW", "New", newPair));
+    TEST_ASSERT_EQUAL_UINT32(11, newPair.deviceId);
+
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::RESTORED_PAIRED),
+                          static_cast<int>(main.discover(legacyLamp.announce())));
+    TEST_ASSERT_EQUAL_UINT8(2, registry.count);
+    TEST_ASSERT_NOT_EQUAL(legacyLamp.announce().deviceId, newPair.deviceId);
+    TEST_ASSERT_EQUAL_UINT32(1, legacyLamp.announce().deviceId);
+}
+
+void test_main_restart_keeps_id_reserved_while_lamp_is_absent() {
+    MemoryProvisioningReservationStore reservations;
+    MemoryProvisioningStore oldLampStorage;
+    LampRegistry firstRegistry;
+    initLampRegistry(firstRegistry);
+    MainProvisioning firstMain(41, firstRegistry, &reservations);
+    ProvisioningLamp oldLamp("HW-OLD", "0.4.0", 0, oldLampStorage);
+    firstMain.discover(oldLamp.announce());
+    firstMain.startCommissioning();
+    ProvisioningPacket oldPair = {};
+    TEST_ASSERT_TRUE(completePairing(firstMain, oldLamp, "HW-OLD", "Old", oldPair));
+    TEST_ASSERT_EQUAL_UINT32(11, oldPair.deviceId);
+
+    // The MAIN restarts before the paired lamp announces itself.
+    LampRegistry restartedRegistry;
+    initLampRegistry(restartedRegistry);
+    MainProvisioning restartedMain(41, restartedRegistry, &reservations);
+    MemoryProvisioningStore newLampStorage;
+    ProvisioningLamp newLamp("HW-NEXT", "0.4.0", 0, newLampStorage);
+    restartedMain.discover(newLamp.announce());
+    restartedMain.startCommissioning();
+    ProvisioningPacket newPair = {};
+    TEST_ASSERT_TRUE(completePairing(
+        restartedMain, newLamp, "HW-NEXT", "Next", newPair));
+    TEST_ASSERT_EQUAL_UINT32(12, newPair.deviceId);
+
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::RESTORED_PAIRED),
+                          static_cast<int>(restartedMain.discover(oldLamp.announce())));
+    TEST_ASSERT_EQUAL_UINT8(2, restartedRegistry.count);
+    TEST_ASSERT_NOT_EQUAL(oldPair.deviceId, newPair.deviceId);
+}
+
+void test_conflicting_legacy_identity_is_rejected_without_replacing_first() {
+    MemoryProvisioningStore firstStorage;
+    MemoryProvisioningStore secondStorage;
+    savePairedLampRecord(firstStorage, "HW-FIRST", 1, 42);
+    savePairedLampRecord(secondStorage, "HW-SECOND", 1, 42);
+    ProvisioningLamp first("HW-FIRST", "0.4.0", 0, firstStorage);
+    ProvisioningLamp second("HW-SECOND", "0.4.0", 0, secondStorage);
+
+    MemoryProvisioningReservationStore reservations;
+    LampRegistry registry;
+    initLampRegistry(registry);
+    MainProvisioning main(42, registry, &reservations);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::RESTORED_PAIRED),
+                          static_cast<int>(main.discover(first.announce())));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::IDENTITY_CONFLICT),
+                          static_cast<int>(main.discover(second.announce())));
+    TEST_ASSERT_EQUAL_UINT8(1, registry.count);
+    TEST_ASSERT_EQUAL_STRING("HW-FIRST", registry.lamps[0].identity.hardwareId);
+}
+
+void test_expired_pairing_releases_lamp_and_rejects_late_confirmation() {
+    MemoryProvisioningReservationStore reservations;
+    LampRegistry registry;
+    initLampRegistry(registry);
+    MainProvisioning main(43, registry, &reservations);
+
+    MemoryProvisioningStore oldStorage;
+    savePairedLampRecord(oldStorage, "HW-EXISTING", 1, 43);
+    ProvisioningLamp existing("HW-EXISTING", "0.4.0", 0, oldStorage);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::RESTORED_PAIRED),
+                          static_cast<int>(main.discover(existing.announce())));
+
+    MemoryProvisioningStore retryStorage;
+    ProvisioningLamp retryLamp("HW-RETRY", "0.4.0", 0, retryStorage);
+    main.discover(retryLamp.announce());
+    main.startCommissioning();
+    ProvisioningPacket request = {};
+    ProvisioningPacket rejection = {};
+    ProvisioningPacket firstAcceptance = {};
+    TEST_ASSERT_TRUE(main.createPairRequest("HW-RETRY", request));
+    TEST_ASSERT_TRUE(retryLamp.handlePairRequest(request, rejection));
+    TEST_ASSERT_TRUE(main.createPairAcceptance(
+        "HW-RETRY", "Retry", firstAcceptance));
+    TEST_ASSERT_EQUAL_UINT32(11, firstAcceptance.deviceId);
+
+    ProvisioningPacket lateConfirmation = {};
+    lateConfirmation.type = ProvisioningPacketType::PAIR_CONFIRM;
+    lateConfirmation.role = DeviceRole::LAMP;
+    lateConfirmation.pairingState = PairingState::PAIRED;
+    lateConfirmation.deviceId = firstAcceptance.deviceId;
+    lateConfirmation.parentMainId = firstAcceptance.parentMainId;
+    strncpy(lateConfirmation.hardwareId, firstAcceptance.hardwareId,
+            sizeof(lateConfirmation.hardwareId) - 1);
+    strncpy(lateConfirmation.name, firstAcceptance.name,
+            sizeof(lateConfirmation.name) - 1);
+
+    fakeMillis += PROVISIONING_TRANSACTION_TIMEOUT_MS;
+    main.expirePendingPairing(fakeMillis);
+    retryLamp.expirePendingRequest(fakeMillis);
+    TEST_ASSERT_FALSE(main.confirmPairing(lateConfirmation));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(PairingState::UNPAIRED),
+                          static_cast<int>(retryLamp.state()));
+    TEST_ASSERT_EQUAL_UINT8(1, registry.count);
+    TEST_ASSERT_EQUAL_UINT32(1, registry.lamps[0].device.id);
+
+    // A fresh announcement permits retry, which consumes a new ID.
+    main.discover(retryLamp.announce());
+    TEST_ASSERT_TRUE(main.createPairRequest("HW-RETRY", request));
+    TEST_ASSERT_TRUE(retryLamp.handlePairRequest(request, rejection));
+    ProvisioningPacket secondAcceptance = {};
+    TEST_ASSERT_TRUE(main.createPairAcceptance(
+        "HW-RETRY", "Retry", secondAcceptance));
+    TEST_ASSERT_EQUAL_UINT32(12, secondAcceptance.deviceId);
+    TEST_ASSERT_FALSE(main.confirmPairing(lateConfirmation));
+
+    ProvisioningPacket validConfirmation = {};
+    TEST_ASSERT_TRUE(retryLamp.handlePairAccept(secondAcceptance, validConfirmation));
+    TEST_ASSERT_TRUE(main.confirmPairing(validConfirmation));
+    TEST_ASSERT_FALSE(main.confirmPairing(validConfirmation));
+    TEST_ASSERT_EQUAL_UINT8(2, registry.count);
+    TEST_ASSERT_EQUAL_UINT32(1, registry.lamps[0].device.id);
+    TEST_ASSERT_EQUAL_UINT32(12, registry.lamps[1].device.id);
+}
+
+void test_repeated_expired_reservations_for_same_identity_do_not_fill_table() {
+    constexpr uint32_t MAIN_ID = 48;
+    constexpr uint32_t FAILED_ATTEMPTS = 24;
+    MemoryProvisioningReservationStore reservations;
+    LampRegistry registry;
+    initLampRegistry(registry);
+    MainProvisioning main(MAIN_ID, registry, &reservations);
+    MemoryProvisioningStore lampStorage;
+    ProvisioningLamp lamp("HW-RETRY-MANY", "0.4.0", 0, lampStorage);
+
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::DISCOVERED_UNPAIRED),
+                          static_cast<int>(main.discover(lamp.announce())));
+    main.startCommissioning();
+
+    for (uint32_t attempt = 0; attempt < FAILED_ATTEMPTS; ++attempt) {
+        ProvisioningPacket request = {};
+        ProvisioningPacket rejection = {};
+        ProvisioningPacket acceptance = {};
+        TEST_ASSERT_TRUE(main.createPairRequest("HW-RETRY-MANY", request));
+        TEST_ASSERT_TRUE(lamp.handlePairRequest(request, rejection));
+        TEST_ASSERT_TRUE(main.createPairAcceptance(
+            "HW-RETRY-MANY", "Retry", acceptance));
+        TEST_ASSERT_EQUAL_UINT32(11 + attempt, acceptance.deviceId);
+
+        fakeMillis += PROVISIONING_TRANSACTION_TIMEOUT_MS;
+        main.expirePendingPairing(fakeMillis);
+        lamp.expirePendingRequest(fakeMillis);
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(PairingState::UNPAIRED),
+                              static_cast<int>(lamp.state()));
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::DUPLICATE_ANNOUNCEMENT),
+                              static_cast<int>(main.discover(lamp.announce())));
+    }
+
+    MainProvisioningReservationState state = {};
+    TEST_ASSERT_TRUE(reservations.load(MAIN_ID, state));
+    TEST_ASSERT_EQUAL_UINT8(1, state.count);
+    TEST_ASSERT_EQUAL_UINT32(10 + FAILED_ATTEMPTS, state.highWaterDeviceId);
+    TEST_ASSERT_EQUAL_UINT32(10 + FAILED_ATTEMPTS,
+                            state.identities[0].deviceId);
+    TEST_ASSERT_EQUAL_UINT8(0, registry.count);
+
+    ProvisioningPacket confirmedPair = {};
+    TEST_ASSERT_TRUE(completePairing(
+        main, lamp, "HW-RETRY-MANY", "Retry", confirmedPair));
+    TEST_ASSERT_EQUAL_UINT32(11 + FAILED_ATTEMPTS, confirmedPair.deviceId);
+    TEST_ASSERT_EQUAL_UINT8(1, registry.count);
+    TEST_ASSERT_EQUAL_UINT32(confirmedPair.deviceId, registry.lamps[0].device.id);
+}
+
+void test_invalid_pair_confirm_does_not_change_registry_or_pending_pair() {
+    MemoryProvisioningReservationStore reservations;
+    LampRegistry registry;
+    initLampRegistry(registry);
+    MainProvisioning main(44, registry, &reservations);
+    MemoryProvisioningStore storage;
+    ProvisioningLamp lamp("HW-INVALID-ACK", "0.4.0", 0, storage);
+    main.discover(lamp.announce());
+    main.startCommissioning();
+
+    ProvisioningPacket request = {};
+    ProvisioningPacket rejection = {};
+    ProvisioningPacket acceptance = {};
+    ProvisioningPacket confirmation = {};
+    TEST_ASSERT_TRUE(main.createPairRequest("HW-INVALID-ACK", request));
+    TEST_ASSERT_TRUE(lamp.handlePairRequest(request, rejection));
+    TEST_ASSERT_TRUE(main.createPairAcceptance(
+        "HW-INVALID-ACK", "Test", acceptance));
+    TEST_ASSERT_TRUE(lamp.handlePairAccept(acceptance, confirmation));
+
+    ProvisioningPacket invalid = confirmation;
+    invalid.role = DeviceRole::MAIN;
+    TEST_ASSERT_FALSE(main.confirmPairing(invalid));
+    invalid = confirmation;
+    invalid.parentMainId += 1;
+    TEST_ASSERT_FALSE(main.confirmPairing(invalid));
+    invalid = confirmation;
+    invalid.deviceId += 1;
+    TEST_ASSERT_FALSE(main.confirmPairing(invalid));
+    invalid = confirmation;
+    strncpy(invalid.hardwareId, "HW-OTHER", sizeof(invalid.hardwareId) - 1);
+    TEST_ASSERT_FALSE(main.confirmPairing(invalid));
+    invalid = confirmation;
+    strncpy(invalid.name, "Other", sizeof(invalid.name) - 1);
+    TEST_ASSERT_FALSE(main.confirmPairing(invalid));
+    TEST_ASSERT_EQUAL_UINT8(0, registry.count);
+
+    TEST_ASSERT_TRUE(main.confirmPairing(confirmation));
+    TEST_ASSERT_FALSE(main.confirmPairing(confirmation));
+    TEST_ASSERT_EQUAL_UINT8(1, registry.count);
+}
+
+void test_reservation_write_failure_blocks_new_pairing_and_keeps_existing_lamp() {
+    MemoryProvisioningReservationStore reservations;
+    LampRegistry registry;
+    initLampRegistry(registry);
+    MainProvisioning main(45, registry, &reservations);
+    MemoryProvisioningStore oldStorage;
+    savePairedLampRecord(oldStorage, "HW-SAFE", 1, 45);
+    ProvisioningLamp oldLamp("HW-SAFE", "0.4.0", 0, oldStorage);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::RESTORED_PAIRED),
+                          static_cast<int>(main.discover(oldLamp.announce())));
+
+    MemoryProvisioningStore newStorage;
+    ProvisioningLamp newLamp("HW-WRITE-FAIL", "0.4.0", 0, newStorage);
+    main.discover(newLamp.announce());
+    main.startCommissioning();
+    ProvisioningPacket request = {};
+    TEST_ASSERT_TRUE(main.createPairRequest("HW-WRITE-FAIL", request));
+    reservations.setFailWrites(true);
+    ProvisioningPacket acceptance = {};
+    TEST_ASSERT_FALSE(main.createPairAcceptance(
+        "HW-WRITE-FAIL", "New", acceptance));
+    main.abortPendingPairing();
+    TEST_ASSERT_FALSE(main.createPairRequest("HW-WRITE-FAIL", request));
+    TEST_ASSERT_EQUAL_UINT8(1, registry.count);
+    TEST_ASSERT_EQUAL_STRING("HW-SAFE", registry.lamps[0].identity.hardwareId);
+    TEST_ASSERT_EQUAL_UINT32(1, registry.lamps[0].device.id);
+}
+
+void test_reservation_state_from_another_main_disables_pairing() {
+    MemoryProvisioningReservationStore reservations;
+    MainProvisioningReservationState wrongOwner = {};
+    initializeMainProvisioningReservationState(99, wrongOwner);
+    TEST_ASSERT_TRUE(reservations.save(wrongOwner));
+
+    LampRegistry registry;
+    initLampRegistry(registry);
+    MainProvisioning main(46, registry, &reservations);
+    MemoryProvisioningStore storage;
+    ProvisioningLamp lamp("HW-OWNER", "0.4.0", 0, storage);
+    main.discover(lamp.announce());
+    main.startCommissioning();
+    ProvisioningPacket request = {};
+    TEST_ASSERT_FALSE(main.createPairRequest("HW-OWNER", request));
+    TEST_ASSERT_EQUAL_UINT8(0, registry.count);
+}
+
+void test_incoherent_reservation_state_fails_closed_but_restores_legacy_lamp() {
+    CorruptProvisioningReservationStore reservations;
+    LampRegistry registry;
+    initLampRegistry(registry);
+    MainProvisioning main(47, registry, &reservations);
+    MemoryProvisioningStore legacyStorage;
+    savePairedLampRecord(legacyStorage, "HW-LEGACY-SAFE", 1, 47);
+    ProvisioningLamp legacy("HW-LEGACY-SAFE", "0.4.0", 0, legacyStorage);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::RESTORED_PAIRED),
+                          static_cast<int>(main.discover(legacy.announce())));
+
+    MemoryProvisioningStore candidateStorage;
+    ProvisioningLamp candidate("HW-CANDIDATE", "0.4.0", 0, candidateStorage);
+    main.discover(candidate.announce());
+    main.startCommissioning();
+    ProvisioningPacket request = {};
+    TEST_ASSERT_FALSE(main.createPairRequest("HW-CANDIDATE", request));
+    TEST_ASSERT_EQUAL_UINT8(1, registry.count);
+    TEST_ASSERT_EQUAL_STRING("HW-LEGACY-SAFE", registry.lamps[0].identity.hardwareId);
+}
+
+void test_pairing_capacity_is_rejected_before_new_reservation() {
+    MemoryProvisioningStore candidateStorage;
+    ProvisioningLamp candidate("HW-CAPACITY-CANDIDATE", "0.4.0", 0,
+                               candidateStorage);
+    ProvisioningPacket request = {};
+
+    MemoryProvisioningReservationStore fullReservationStore;
+    MainProvisioningReservationState fullReservations = {};
+    initializeMainProvisioningReservationState(70, fullReservations);
+    fullReservations.count = MAX_LAMPS;
+    for (uint8_t index = 0; index < MAX_LAMPS; ++index) {
+        fullReservations.identities[index].deviceId = index + 1;
+        snprintf(fullReservations.identities[index].hardwareId,
+                 sizeof(fullReservations.identities[index].hardwareId),
+                 "HW-RESERVED-%02u", static_cast<unsigned>(index));
+    }
+    TEST_ASSERT_TRUE(fullReservationStore.save(fullReservations));
+    LampRegistry reservationLimitedRegistry;
+    initLampRegistry(reservationLimitedRegistry);
+    MainProvisioning reservationLimitedMain(70, reservationLimitedRegistry,
+                                             &fullReservationStore);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::DISCOVERED_UNPAIRED),
+        static_cast<int>(reservationLimitedMain.discover(candidate.announce())));
+    reservationLimitedMain.startCommissioning();
+    TEST_ASSERT_FALSE(reservationLimitedMain.canPairCandidate(
+        "HW-CAPACITY-CANDIDATE"));
+    TEST_ASSERT_FALSE(reservationLimitedMain.createPairRequest(
+        "HW-CAPACITY-CANDIDATE", request));
+    MainProvisioningReservationState preserved = {};
+    TEST_ASSERT_TRUE(fullReservationStore.load(70, preserved));
+    TEST_ASSERT_EQUAL_UINT8(MAX_LAMPS, preserved.count);
+    TEST_ASSERT_EQUAL_UINT32(MAX_LAMPS, preserved.highWaterDeviceId);
+
+    MemoryProvisioningReservationStore lampLimitedStore;
+    LampRegistry fullRegistry;
+    initLampRegistry(fullRegistry);
+    MainProvisioning lampLimitedMain(71, fullRegistry, &lampLimitedStore);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::DISCOVERED_UNPAIRED),
+        static_cast<int>(lampLimitedMain.discover(candidate.announce())));
+    lampLimitedMain.startCommissioning();
+    fullRegistry.count = MAX_LAMPS;
+    TEST_ASSERT_FALSE(lampLimitedMain.canPairCandidate("HW-CAPACITY-CANDIDATE"));
+    TEST_ASSERT_FALSE(lampLimitedMain.createPairRequest(
+        "HW-CAPACITY-CANDIDATE", request));
+    TEST_ASSERT_TRUE(lampLimitedStore.load(71, preserved));
+    TEST_ASSERT_EQUAL_UINT8(0, preserved.count);
+    TEST_ASSERT_EQUAL_UINT32(MAX_LAMPS, preserved.highWaterDeviceId);
+}
+
+void test_unpaired_candidate_expires_without_changing_paired_registry() {
+    MemoryProvisioningReservationStore reservations;
+    LampRegistry registry;
+    initLampRegistry(registry);
+    MainProvisioning main(72, registry, &reservations);
+    MemoryProvisioningStore candidateStorage;
+    MemoryProvisioningStore pairedStorage;
+    ProvisioningLamp candidate("HW-TTL-CANDIDATE", "0.4.0", 0,
+                               candidateStorage);
+    ProvisioningLamp existing("HW-TTL-PAIRED", "0.4.0", 0,
+                               pairedStorage);
+    main.discover(existing.announce());
+    main.startCommissioning();
+    ProvisioningPacket request = {};
+    ProvisioningPacket rejection = {};
+    TEST_ASSERT_TRUE(main.createPairRequest("HW-TTL-PAIRED", request));
+    TEST_ASSERT_TRUE(existing.handlePairRequest(request, rejection));
+    ProvisioningPacket acceptance = {};
+    TEST_ASSERT_TRUE(main.createPairAcceptance("HW-TTL-PAIRED", "existing",
+                                                acceptance));
+    ProvisioningPacket confirmation = {};
+    TEST_ASSERT_TRUE(existing.handlePairAccept(acceptance, confirmation));
+    TEST_ASSERT_TRUE(main.confirmPairing(confirmation));
+
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::DISCOVERED_UNPAIRED),
+        static_cast<int>(main.discover(candidate.announce())));
+    TEST_ASSERT_TRUE(main.hasUnpairedCandidate("HW-TTL-CANDIDATE"));
+    main.expireUnpairedCandidates(PROVISIONING_TRANSACTION_TIMEOUT_MS);
+    TEST_ASSERT_TRUE(main.hasUnpairedCandidate("HW-TTL-CANDIDATE"));
+    main.expireUnpairedCandidates(PROVISIONING_TRANSACTION_TIMEOUT_MS + 1);
+    TEST_ASSERT_FALSE(main.hasUnpairedCandidate("HW-TTL-CANDIDATE"));
+    TEST_ASSERT_EQUAL_UINT8(1, registry.count);
+    TEST_ASSERT_EQUAL_STRING("HW-TTL-PAIRED", registry.lamps[0].identity.hardwareId);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_unconfigured_lamp_announces_identity_through_simulation_transport);
@@ -391,5 +827,16 @@ int main() {
     RUN_TEST(test_two_mains_can_discover_but_only_commissioning_main_can_pair);
     RUN_TEST(test_registry_finds_provisioned_lamp_by_hardware_id);
     RUN_TEST(test_registry_finds_lamps_by_parent_main_id);
+    RUN_TEST(test_upgrade_reserves_legacy_ids_while_old_lamp_is_absent);
+    RUN_TEST(test_main_restart_keeps_id_reserved_while_lamp_is_absent);
+    RUN_TEST(test_conflicting_legacy_identity_is_rejected_without_replacing_first);
+    RUN_TEST(test_expired_pairing_releases_lamp_and_rejects_late_confirmation);
+    RUN_TEST(test_repeated_expired_reservations_for_same_identity_do_not_fill_table);
+    RUN_TEST(test_invalid_pair_confirm_does_not_change_registry_or_pending_pair);
+    RUN_TEST(test_reservation_write_failure_blocks_new_pairing_and_keeps_existing_lamp);
+    RUN_TEST(test_reservation_state_from_another_main_disables_pairing);
+    RUN_TEST(test_incoherent_reservation_state_fails_closed_but_restores_legacy_lamp);
+    RUN_TEST(test_pairing_capacity_is_rejected_before_new_reservation);
+    RUN_TEST(test_unpaired_candidate_expires_without_changing_paired_registry);
     return UNITY_END();
 }

@@ -28,3 +28,8 @@ public:
     /* Used by the SDK worker after esp_zigbee_start() succeeds. */
     void markStackStarted();
 };
+
+/* MAIN-only commissioning controls used by the bounded V7 pairing session. */
+bool openZigbeeJoinWindow(uint8_t durationSeconds);
+bool closeZigbeeJoinWindow();
+bool hasZigbeeRouteForHardwareId(const char* hardwareId);

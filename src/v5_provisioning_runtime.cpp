@@ -9,6 +9,7 @@
 #include "message_id_generator.h"
 #include "message_router.h"
 #include "v5_provisioning_runtime.h"
+#include "zigbee_transport.h"
 
 namespace {
 uint32_t stableLogicalId(const char* hardwareId) {
@@ -53,19 +54,32 @@ V5ProvisioningRuntime::V5ProvisioningRuntime(
       tracker(trackerValue),
       role(DeviceRole::LAMP),
       lampStore(nullptr),
+      reservationStore(nullptr),
       lampPairing(nullptr),
       mainPairing(nullptr),
       mainLogicalId(0),
-      nextAnnounceAt(0) {
+      nextAnnounceAt(0),
+      activePairingSessionId(0),
+      lastClosedPairingSessionId(0),
+      pairingSessionStartedAt(0),
+      pairingSessionDurationSeconds(0),
+      pairingSessionExpired(false),
+      nextPairingCloseAttemptAt(0),
+      activePairingOperationId(0),
+      activePairingOperationSessionId(0),
+      pairingOperationStartedAt(0) {
     hardwareId[0] = '\0';
+    activePairingHardwareId[0] = '\0';
 }
 
 bool V5ProvisioningRuntime::begin(
     DeviceRole roleValue,
-    ProvisioningStore* lampStoreValue
+    ProvisioningStore* lampStoreValue,
+    ProvisioningReservationStore* reservationStoreValue
 ) {
     role = roleValue;
     lampStore = lampStoreValue;
+    reservationStore = reservationStoreValue;
     if (!readDeviceHardwareId(hardwareId, sizeof(hardwareId))) {
         Serial.println("[IDENTITY] failed to read IEEE 802.15.4 hardware ID");
         return false;
@@ -73,7 +87,8 @@ bool V5ProvisioningRuntime::begin(
 
     mainLogicalId = stableLogicalId(hardwareId);
     if (role == DeviceRole::MAIN) {
-        mainPairing = new (std::nothrow) MainProvisioning(mainLogicalId, lamps);
+        mainPairing = new (std::nothrow)
+            MainProvisioning(mainLogicalId, lamps, reservationStore);
         if (mainPairing == nullptr) {
             return false;
         }
@@ -100,9 +115,47 @@ bool V5ProvisioningRuntime::begin(
 }
 
 void V5ProvisioningRuntime::poll() {
+    const uint32_t now = millis();
+    if (role == DeviceRole::MAIN && mainPairing != nullptr) {
+        mainPairing->expirePendingPairing(now);
+        mainPairing->expireUnpairedCandidates(now);
+        if (activePairingOperationId != 0 &&
+            now - pairingOperationStartedAt >=
+                PROVISIONING_TRANSACTION_TIMEOUT_MS) {
+            sendPairingOperationResult(activePairingOperationSessionId,
+                activePairingOperationId, CorePairingResultCode::EXPIRED, 0,
+                activePairingHardwareId);
+            clearPairingOperation();
+        }
+        if (activePairingSessionId != 0 && !pairingSessionExpired &&
+            now - pairingSessionStartedAt >=
+                static_cast<uint32_t>(pairingSessionDurationSeconds) * 1000U) {
+            pairingSessionExpired = true;
+            mainPairing->stopCommissioning();
+            mainPairing->clearUnpairedCandidates();
+            nextPairingCloseAttemptAt = now;
+        }
+        if (activePairingSessionId != 0 && pairingSessionExpired &&
+            static_cast<int32_t>(now - nextPairingCloseAttemptAt) >= 0) {
+            const uint32_t expiredSession = activePairingSessionId;
+            if (closeZigbeeJoinWindow()) {
+                activePairingSessionId = 0;
+                lastClosedPairingSessionId = expiredSession;
+                pairingSessionDurationSeconds = 0;
+                pairingSessionExpired = false;
+                nextPairingCloseAttemptAt = 0;
+                sendPairingSessionResult(expiredSession, CorePairingResultCode::EXPIRED);
+            } else {
+                nextPairingCloseAttemptAt = now + 5000;
+                sendPairingSessionResult(expiredSession, CorePairingResultCode::UNCERTAIN);
+            }
+        }
+        return;
+    }
     if (role != DeviceRole::LAMP || lampPairing == nullptr) {
         return;
     }
+    lampPairing->expirePendingRequest(now);
 
     const ProvisioningPacket announcement = lampPairing->announce();
     if (announcement.pairingState == PairingState::PAIRED &&
@@ -119,7 +172,6 @@ void V5ProvisioningRuntime::poll() {
         return;
     }
 
-    const uint32_t now = millis();
     if (static_cast<int32_t>(now - nextAnnounceAt) < 0) {
         return;
     }
@@ -140,23 +192,188 @@ bool V5ProvisioningRuntime::commissionLamp(
         return false;
     }
 
+    const bool ownsCommissioningWindow =
+        !mainPairing->commissioningIsEnabled();
     ProvisioningPacket request = {};
-    mainPairing->startCommissioning();
+    if (ownsCommissioningWindow) mainPairing->startCommissioning();
     const bool requestCreated =
         mainPairing->createPairRequest(hardwareIdValue, request);
     if (!requestCreated) {
-        mainPairing->stopCommissioning();
+        if (ownsCommissioningWindow) mainPairing->stopCommissioning();
         return false;
     }
     const bool requestSent = sendPacket(request, mainLogicalId, 0);
+    if (!requestSent) {
+        mainPairing->abortPendingPairing();
+        if (ownsCommissioningWindow) mainPairing->stopCommissioning();
+        return false;
+    }
 
     ProvisioningPacket acceptance = {};
     const bool acceptanceCreated = mainPairing->createPairAcceptance(
         hardwareIdValue, requestedName, acceptance);
-    const bool acceptanceSent = acceptanceCreated &&
-        sendPacket(acceptance, mainLogicalId, 0);
-    mainPairing->stopCommissioning();
-    return requestSent && acceptanceSent;
+    if (!acceptanceCreated) {
+        mainPairing->abortPendingPairing();
+        if (ownsCommissioningWindow) mainPairing->stopCommissioning();
+        return false;
+    }
+    const bool acceptanceSent = sendPacket(acceptance, mainLogicalId, 0);
+    if (!acceptanceSent) {
+        mainPairing->abortPendingPairing();
+    }
+    if (ownsCommissioningWindow) mainPairing->stopCommissioning();
+    return acceptanceSent;
+}
+
+void V5ProvisioningRuntime::sendPairingSessionResult(
+    uint32_t sessionId,
+    CorePairingResultCode result
+) {
+    if (role != DeviceRole::MAIN || sessionId == 0) return;
+    Message response = {};
+    if (makeCorePairingSessionResultMessage(mainLogicalId, sessionId,
+                                            result, response)) {
+        response.timestamp = millis();
+        (void)sendMessage(communication, response);
+    }
+}
+
+void V5ProvisioningRuntime::sendPairingOperationResult(
+    uint32_t sessionId,
+    uint32_t operationId,
+    CorePairingResultCode result,
+    uint32_t deviceId,
+    const char* hardwareIdValue
+) {
+    if (role != DeviceRole::MAIN || sessionId == 0 || operationId == 0) return;
+    Message response = {};
+    if (makeCorePairingOperationResultMessage(mainLogicalId, sessionId,
+            operationId, result, deviceId, hardwareIdValue, response)) {
+        response.timestamp = millis();
+        (void)sendMessage(communication, response);
+    }
+}
+
+void V5ProvisioningRuntime::clearPairingOperation() {
+    activePairingOperationId = 0;
+    activePairingOperationSessionId = 0;
+    pairingOperationStartedAt = 0;
+    activePairingHardwareId[0] = '\0';
+}
+
+bool V5ProvisioningRuntime::handleCorePairingControl(const Message& message) {
+    if (role != DeviceRole::MAIN || mainPairing == nullptr ||
+        message.type != MessageType::STATE ||
+        message.commandType != CORE_PAIRING_CONTROL_MESSAGE) return false;
+
+    CorePairingCommand sessionCommand = CorePairingCommand::OPEN_SESSION;
+    uint32_t sessionId = 0;
+    uint16_t duration = 0;
+    if (readCorePairingSessionCommand(message, mainLogicalId,
+            sessionCommand, sessionId, duration)) {
+        if (sessionCommand == CorePairingCommand::OPEN_SESSION) {
+            if (activePairingSessionId == sessionId) {
+                sendPairingSessionResult(sessionId, pairingSessionExpired
+                    ? CorePairingResultCode::UNCERTAIN
+                    : CorePairingResultCode::ACTIVE);
+            } else if (activePairingSessionId != 0) {
+                sendPairingSessionResult(sessionId, CorePairingResultCode::BUSY);
+            } else if (!openZigbeeJoinWindow(static_cast<uint8_t>(duration))) {
+                sendPairingSessionResult(sessionId, CorePairingResultCode::UNCERTAIN);
+            } else {
+                activePairingSessionId = sessionId;
+                pairingSessionStartedAt = millis();
+                pairingSessionDurationSeconds = duration;
+                mainPairing->startCommissioning();
+                sendPairingSessionResult(sessionId, CorePairingResultCode::ACTIVE);
+                Serial.println("[PAIRING] radio admission window opened");
+            }
+            return true;
+        }
+
+        if (activePairingSessionId != sessionId) {
+            if (activePairingSessionId != 0) {
+                sendPairingSessionResult(sessionId, CorePairingResultCode::BUSY);
+            } else if (lastClosedPairingSessionId == sessionId) {
+                sendPairingSessionResult(sessionId, CorePairingResultCode::CLOSED);
+            } else if (closeZigbeeJoinWindow()) {
+                lastClosedPairingSessionId = sessionId;
+                mainPairing->stopCommissioning();
+                mainPairing->clearUnpairedCandidates();
+                sendPairingSessionResult(sessionId, CorePairingResultCode::CLOSED);
+            } else {
+                sendPairingSessionResult(sessionId, CorePairingResultCode::UNCERTAIN);
+            }
+        } else if (activePairingOperationId != 0) {
+            sendPairingSessionResult(sessionId, CorePairingResultCode::BUSY);
+        } else if (!closeZigbeeJoinWindow()) {
+            if (pairingSessionExpired) nextPairingCloseAttemptAt = millis() + 5000;
+            sendPairingSessionResult(sessionId, CorePairingResultCode::UNCERTAIN);
+        } else {
+            mainPairing->stopCommissioning();
+            mainPairing->clearUnpairedCandidates();
+            activePairingSessionId = 0;
+            lastClosedPairingSessionId = sessionId;
+            pairingSessionDurationSeconds = 0;
+            pairingSessionExpired = false;
+            nextPairingCloseAttemptAt = 0;
+            sendPairingSessionResult(sessionId, CorePairingResultCode::CLOSED);
+            Serial.println("[PAIRING] radio admission window closed");
+        }
+        return true;
+    }
+
+    uint32_t operationSessionId = 0;
+    uint32_t operationId = 0;
+    if (!readCorePairingOperationCommand(message, mainLogicalId,
+            operationSessionId, operationId)) {
+        sendPairingOperationResult(message.parentMainId, message.id,
+            CorePairingResultCode::FAILED, 0, message.hardwareId);
+        return true;
+    }
+    if (operationSessionId != activePairingSessionId ||
+        activePairingSessionId == 0 || pairingSessionExpired) {
+        sendPairingOperationResult(operationSessionId, operationId,
+            CorePairingResultCode::NOT_FOUND, 0, message.hardwareId);
+        return true;
+    }
+    if (activePairingOperationId != 0 ||
+        !mainPairing->hasUnpairedCandidate(message.hardwareId)) {
+        sendPairingOperationResult(operationSessionId, operationId,
+            activePairingOperationId != 0 ? CorePairingResultCode::BUSY
+                                          : CorePairingResultCode::NOT_FOUND,
+            0, message.hardwareId);
+        return true;
+    }
+    if (!mainPairing->canPairCandidate(message.hardwareId)) {
+        sendPairingOperationResult(operationSessionId, operationId,
+            mainPairing->pairingCapacityReached(message.hardwareId)
+                ? CorePairingResultCode::CAPACITY
+                : CorePairingResultCode::FAILED,
+            0, message.hardwareId);
+        return true;
+    }
+    if (!hasZigbeeRouteForHardwareId(message.hardwareId)) {
+        sendPairingOperationResult(operationSessionId, operationId,
+            CorePairingResultCode::ROUTE_UNAVAILABLE, 0, message.hardwareId);
+        return true;
+    }
+
+    activePairingOperationId = operationId;
+    activePairingOperationSessionId = operationSessionId;
+    pairingOperationStartedAt = millis();
+    strncpy(activePairingHardwareId, message.hardwareId,
+            sizeof(activePairingHardwareId) - 1);
+    activePairingHardwareId[sizeof(activePairingHardwareId) - 1] = '\0';
+    if (!commissionLamp(message.hardwareId, message.name)) {
+        sendPairingOperationResult(operationSessionId, operationId,
+            CorePairingResultCode::FAILED, 0, message.hardwareId);
+        clearPairingOperation();
+    } else {
+        sendPairingOperationResult(operationSessionId, operationId,
+            CorePairingResultCode::PROCESSING, 0, message.hardwareId);
+    }
+    return true;
 }
 
 bool V5ProvisioningRuntime::setPower(uint32_t deviceId, bool enabled) {
@@ -205,6 +422,10 @@ bool V5ProvisioningRuntime::handleMessage(
 }
 
 bool V5ProvisioningRuntime::dispatch(const Message& message) {
+    if (message.type == MessageType::STATE &&
+        message.commandType == CORE_PAIRING_CONTROL_MESSAGE) {
+        return handleCorePairingControl(message);
+    }
     if (!isProvisioningMessage(message.type)) {
         return false;
     }
@@ -221,6 +442,31 @@ bool V5ProvisioningRuntime::dispatch(const Message& message) {
                 Serial.print("[DISCOVERY] DEVICE_ANNOUNCE hardwareId=");
                 Serial.print(packet.hardwareId);
                 Serial.println(" (pairing not automatic)");
+                if (activePairingSessionId != 0 && !pairingSessionExpired) {
+                    Message candidate = {};
+                    if (makeCorePairingCandidateMessage(mainLogicalId,
+                            activePairingSessionId, packet, candidate)) {
+                        candidate.timestamp = millis();
+                        (void)sendMessage(communication, candidate);
+                    }
+                }
+            } else if (result == DiscoveryResult::DUPLICATE_ANNOUNCEMENT &&
+                       packet.pairingState == PairingState::UNPAIRED &&
+                       activePairingSessionId != 0 && !pairingSessionExpired) {
+                Message candidate = {};
+                if (makeCorePairingCandidateMessage(mainLogicalId,
+                        activePairingSessionId, packet, candidate)) {
+                    candidate.timestamp = millis();
+                    (void)sendMessage(communication, candidate);
+                }
+            } else if (result == DiscoveryResult::CANDIDATE_CAPACITY &&
+                       activePairingSessionId != 0 && !pairingSessionExpired) {
+                Message limit = {};
+                if (makeCorePairingCandidateLimitMessage(mainLogicalId,
+                        activePairingSessionId, limit)) {
+                    limit.timestamp = millis();
+                    (void)sendMessage(communication, limit);
+                }
             } else if (result == DiscoveryResult::RESTORED_PAIRED) {
                 Serial.print("[PAIRING] restored Device ID ");
                 Serial.println(packet.deviceId);
@@ -233,8 +479,29 @@ bool V5ProvisioningRuntime::dispatch(const Message& message) {
             if (mainPairing->confirmPairing(packet)) {
                 Serial.print("[PAIRING] PAIRED deviceId=");
                 Serial.println(packet.deviceId);
+                if (activePairingOperationId != 0 &&
+                    strncmp(activePairingHardwareId, packet.hardwareId,
+                            sizeof(activePairingHardwareId)) == 0) {
+                    sendPairingOperationResult(activePairingOperationSessionId,
+                        activePairingOperationId, CorePairingResultCode::SUCCEEDED,
+                        packet.deviceId, packet.hardwareId);
+                    clearPairingOperation();
+                }
             } else {
                 Serial.println("[PAIRING] invalid PAIR_CONFIRM rejected");
+            }
+            return true;
+        }
+        if (packet.type == ProvisioningPacketType::PAIR_REJECT) {
+            if (activePairingOperationId != 0 &&
+                strncmp(activePairingHardwareId, packet.hardwareId,
+                        sizeof(activePairingHardwareId)) == 0) {
+                const uint32_t sessionId = activePairingOperationSessionId;
+                const uint32_t operationId = activePairingOperationId;
+                mainPairing->abortPendingPairing();
+                sendPairingOperationResult(sessionId, operationId,
+                    CorePairingResultCode::REJECTED, 0, packet.hardwareId);
+                clearPairingOperation();
             }
             return true;
         }

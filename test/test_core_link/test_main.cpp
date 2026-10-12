@@ -338,6 +338,44 @@ void test_lamp_reannouncement_preserves_state_only_for_same_v7_identity() {
                           static_cast<int>(replacement->lastConfirmedPower));
 }
 
+void test_uart_pairing_candidate_operation_and_result_round_trip() {
+    CoreLinkPacket input = {};
+    input.sequence = 9;
+    input.type = CoreLinkMessageType::PAIRING;
+    input.localId = 12;
+    input.pairingAction = CoreLinkPairingAction::PAIR_CANDIDATE;
+    input.sessionId = 0x12345678;
+    input.operationId = 0x87654321;
+    strncpy(input.hardwareId, "C6-0123456789ABCDEF", sizeof(input.hardwareId) - 1);
+    strncpy(input.pairingName, "new lamp", sizeof(input.pairingName) - 1);
+
+    uint8_t bytes[CORE_LINK_MAX_FRAME_SIZE + 1] = {};
+    size_t length = encode(input, bytes, CORE_LINK_MAX_FRAME_SIZE);
+    TEST_ASSERT_GREATER_THAN_UINT(0, length);
+    CoreLinkPacket output = {};
+    TEST_ASSERT_TRUE(decodeCoreLinkFrame(bytes, length, output));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(input.pairingAction),
+                            static_cast<uint8_t>(output.pairingAction));
+    TEST_ASSERT_EQUAL_UINT32(input.localId, output.localId);
+    TEST_ASSERT_EQUAL_UINT32(input.sessionId, output.sessionId);
+    TEST_ASSERT_EQUAL_UINT32(input.operationId, output.operationId);
+    TEST_ASSERT_EQUAL_STRING(input.hardwareId, output.hardwareId);
+    TEST_ASSERT_EQUAL_STRING(input.pairingName, output.pairingName);
+
+    input.pairingAction = CoreLinkPairingAction::OPERATION_RESULT;
+    input.pairingResult = CorePairingResultCode::ROUTE_UNAVAILABLE;
+    input.deviceId = 0;
+    length = encode(input, bytes, CORE_LINK_MAX_FRAME_SIZE);
+    TEST_ASSERT_GREATER_THAN_UINT(0, length);
+    TEST_ASSERT_TRUE(decodeCoreLinkFrame(bytes, length, output));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CorePairingResultCode::ROUTE_UNAVAILABLE),
+                          static_cast<int>(output.pairingResult));
+
+    bytes[16] = 0xA5;
+    TEST_ASSERT_FALSE(encode(input, bytes, 16));
+    TEST_ASSERT_EQUAL_UINT8(0xA5, bytes[16]);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_uart_announcement_frame_round_trip);
@@ -347,5 +385,6 @@ int main(int, char**) {
     RUN_TEST(test_repeated_announcement_updates_without_duplicate_and_conflict_is_rejected);
     RUN_TEST(test_paired_lamp_announcement_uses_core_assigned_main_parent_id);
     RUN_TEST(test_lamp_reannouncement_preserves_state_only_for_same_v7_identity);
+    RUN_TEST(test_uart_pairing_candidate_operation_and_result_round_trip);
     return UNITY_END();
 }

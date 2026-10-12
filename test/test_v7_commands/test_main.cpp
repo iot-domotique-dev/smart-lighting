@@ -179,9 +179,10 @@ public:
     bool exercisePhysicalRoutes;
 
     explicit Network(uint32_t localLampId = LAMP_LOCAL, bool routePhysical = false,
-                     bool includeSecondLamp = false)
+                     bool includeSecondLamp = false,
+                     uint32_t secondLocalLampId = SECOND_LAMP_LOCAL)
         : lampLocal(localLampId), lampId(makeCoreModuleId(mainId, localLampId)),
-          secondLampLocal(includeSecondLamp ? SECOND_LAMP_LOCAL : 0),
+          secondLampLocal(includeSecondLamp ? secondLocalLampId : 0),
           secondLampId(makeCoreModuleId(mainId, secondLampLocal)),
           exercisePhysicalRoutes(routePhysical) {
         initDeviceRegistry(registry);
@@ -823,7 +824,10 @@ void test_overlapping_same_lamp_commands_keep_history_stale_on_reordered_acks() 
 }
 
 void test_two_lamps_route_power_and_correlate_retries_independently() {
-    Network network(LAMP_LOCAL, true, true);
+    // Exercise the legacy local ID 1 beside the first allocated V7.6.2 ID 11.
+    Network network(1, true, true, 11);
+    TEST_ASSERT_EQUAL_UINT32(1, network.lampLocal);
+    TEST_ASSERT_EQUAL_UINT32(11, network.secondLampLocal);
     TEST_ASSERT_NOT_EQUAL(network.lampLocal, network.secondLampLocal);
     TEST_ASSERT_NOT_EQUAL(network.lampId, network.secondLampId);
     TEST_ASSERT_EQUAL_UINT8(2, network.mainLamps.count);

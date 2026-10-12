@@ -1,8 +1,10 @@
 #include <Arduino.h>
+#include <string.h>
 
 #include "core_zigbee_runtime.h"
 
 #include "core_module_service.h"
+#include "core_pairing_protocol.h"
 #include "core_topology_protocol.h"
 #include "message_router.h"
 
@@ -67,6 +69,75 @@ bool CoreZigbeeRuntime::dispatchZigbeeMessage(const Message& message) {
         return false;
     }
 
+    uint32_t pairingMainLocalId = 0;
+    uint32_t pairingSessionId = 0;
+    if (readCorePairingCandidateMessage(message, pairingMainLocalId,
+                                        pairingSessionId)) {
+        CoreLinkPacket candidate = {};
+        candidate.type = CoreLinkMessageType::PAIRING;
+        candidate.sequence = static_cast<uint16_t>(pairingSessionId);
+        candidate.pairingAction = CoreLinkPairingAction::CANDIDATE;
+        candidate.localId = pairingMainLocalId;
+        candidate.sessionId = pairingSessionId;
+        candidate.capabilities = message.capabilities;
+        strncpy(candidate.hardwareId, message.hardwareId,
+                sizeof(candidate.hardwareId) - 1);
+        if (pairingMainLocalId != mainLocalId || mainCoreId == 0 ||
+            !uartReady || !uart.send(candidate)) {
+            Serial.println("[CORE-ZIGBEE] failed to forward pairing candidate");
+        }
+        return true;
+    }
+
+    uint32_t operationSessionId = 0;
+    uint32_t operationId = 0;
+    CorePairingResultCode operationResult = CorePairingResultCode::NONE;
+    uint32_t pairedDeviceId = 0;
+    if (readCorePairingOperationResultMessage(message, mainLocalId,
+            operationSessionId, operationId, operationResult, pairedDeviceId)) {
+        CoreLinkPacket result = {};
+        result.type = CoreLinkMessageType::PAIRING;
+        result.sequence = static_cast<uint16_t>(operationId);
+        result.pairingAction = CoreLinkPairingAction::OPERATION_RESULT;
+        result.localId = mainLocalId;
+        result.sessionId = operationSessionId;
+        result.operationId = operationId;
+        result.pairingResult = operationResult;
+        result.deviceId = pairedDeviceId;
+        strncpy(result.hardwareId, message.hardwareId,
+                sizeof(result.hardwareId) - 1);
+        if (mainCoreId == 0 || !uartReady || !uart.send(result))
+            Serial.println("[CORE-ZIGBEE] failed to forward pairing result");
+        return true;
+    }
+
+    CorePairingResultCode sessionResult = CorePairingResultCode::NONE;
+    if (readCorePairingSessionResultMessage(message, mainLocalId,
+            pairingSessionId, sessionResult)) {
+        CoreLinkPacket result = {};
+        result.type = CoreLinkMessageType::PAIRING;
+        result.sequence = static_cast<uint16_t>(pairingSessionId);
+        result.pairingAction = CoreLinkPairingAction::SESSION_RESULT;
+        result.localId = mainLocalId;
+        result.sessionId = pairingSessionId;
+        result.pairingResult = sessionResult;
+        if (mainCoreId == 0 || !uartReady || !uart.send(result))
+            Serial.println("[CORE-ZIGBEE] failed to forward pairing session status");
+        return true;
+    }
+
+    if (readCorePairingCandidateLimitMessage(message, mainLocalId,
+                                              pairingSessionId)) {
+        CoreLinkPacket limit = {};
+        limit.type = CoreLinkMessageType::PAIRING;
+        limit.sequence = static_cast<uint16_t>(pairingSessionId);
+        limit.pairingAction = CoreLinkPairingAction::CANDIDATE_LIMIT;
+        limit.localId = mainLocalId;
+        limit.sessionId = pairingSessionId;
+        (void)uart.send(limit);
+        return true;
+    }
+
     CoreLinkPacket announcement = {};
     if (!coreAnnouncementFromZigbeeMessage(message, mainCoreId, mainLocalId,
                                            announcement)) {
@@ -81,6 +152,49 @@ bool CoreZigbeeRuntime::dispatchZigbeeMessage(const Message& message) {
 }
 
 void CoreZigbeeRuntime::handleUartPacket(const CoreLinkPacket& packet) {
+    if (packet.type == CoreLinkMessageType::PAIRING) {
+        if (packet.localId == 0 || packet.localId != mainLocalId ||
+            mainCoreId == 0) return;
+        Message request = {};
+        bool valid = false;
+        if (packet.pairingAction == CoreLinkPairingAction::OPEN_SESSION ||
+            packet.pairingAction == CoreLinkPairingAction::CLOSE_SESSION) {
+            valid = makeCorePairingSessionCommand(
+                packet.localId, packet.sessionId,
+                packet.pairingAction == CoreLinkPairingAction::OPEN_SESSION,
+                packet.pairingAction == CoreLinkPairingAction::OPEN_SESSION
+                    ? packet.pairingDurationSeconds : 0,
+                request);
+        } else if (packet.pairingAction == CoreLinkPairingAction::PAIR_CANDIDATE) {
+            valid = makeCorePairingOperationCommand(packet.localId,
+                packet.sessionId, packet.operationId, packet.hardwareId,
+                packet.pairingName, request);
+        }
+        if (!valid) return;
+        request.timestamp = millis();
+        if (sendMessage(zigbee, request)) return;
+
+        CoreLinkPacket failure = {};
+        failure.type = CoreLinkMessageType::PAIRING;
+        failure.localId = mainLocalId;
+        if (packet.pairingAction == CoreLinkPairingAction::PAIR_CANDIDATE) {
+            failure.pairingAction = CoreLinkPairingAction::OPERATION_RESULT;
+            failure.sessionId = packet.sessionId;
+            failure.operationId = packet.operationId;
+            failure.pairingResult = CorePairingResultCode::FAILED;
+            strncpy(failure.hardwareId, packet.hardwareId,
+                    sizeof(failure.hardwareId) - 1);
+        } else {
+            failure.pairingAction = CoreLinkPairingAction::SESSION_RESULT;
+            failure.sessionId = packet.sessionId;
+            failure.pairingResult = packet.pairingAction ==
+                CoreLinkPairingAction::CLOSE_SESSION
+                    ? CorePairingResultCode::UNCERTAIN
+                    : CorePairingResultCode::FAILED;
+        }
+        (void)uart.send(failure);
+        return;
+    }
     if (packet.type == CoreLinkMessageType::COMMAND) {
         (void)commandBridge.handleFromCore(packet.message);
         return;

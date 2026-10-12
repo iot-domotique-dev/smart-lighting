@@ -31,8 +31,11 @@ enum class DiscoveryResult : uint8_t {
     DUPLICATE_ANNOUNCEMENT,
     RECOGNIZED_PAIRED,
     RESTORED_PAIRED,
-    IDENTITY_CONFLICT
+    IDENTITY_CONFLICT,
+    CANDIDATE_CAPACITY
 };
+
+constexpr uint32_t PROVISIONING_TRANSACTION_TIMEOUT_MS = 30000;
 
 class ProvisioningLamp {
 private:
@@ -43,6 +46,7 @@ private:
     ProvisioningRecord configuration;
     PairingState pairingState;
     uint32_t pendingMainId;
+    uint32_t pendingStartedAt;
     bool hasPendingRequest;
 
 public:
@@ -62,6 +66,7 @@ public:
         const ProvisioningPacket& acceptance,
         ProvisioningPacket& confirmation
     );
+    void expirePendingRequest(uint32_t now);
     PairingState state() const;
 };
 
@@ -70,24 +75,45 @@ private:
     static const uint8_t MAX_DISCOVERED_LAMPS = 10;
     uint32_t mainId;
     LampRegistry& registry;
+    ProvisioningReservationStore* reservationStore;
+    MainProvisioningReservationState reservationState;
+    bool reservationStoreReady;
     ProvisioningPacket discovered[MAX_DISCOVERED_LAMPS];
+    uint32_t discoveredAt[MAX_DISCOVERED_LAMPS];
     uint8_t discoveredCount;
     bool commissioningEnabled;
     bool hasPendingPairing;
     char pendingHardwareId[LAMP_HARDWARE_ID_LENGTH];
+    char pendingName[LAMP_NAME_LENGTH];
     uint32_t pendingDeviceId;
+    uint32_t pendingStartedAt;
 
     int8_t findDiscovered(const char* hardwareId) const;
+    int8_t findReservationByHardwareId(const char* hardwareId) const;
+    int8_t findReservationByDeviceId(uint32_t deviceId) const;
     uint32_t findAvailableDeviceId() const;
-    void clearPendingPairing();
+    bool saveReservationState(const MainProvisioningReservationState& state);
+    bool recordPairedIdentity(const ProvisioningPacket& announcement);
+    void clearPendingPairing(bool requireFreshAnnouncement);
 
 public:
-    MainProvisioning(uint32_t mainId, LampRegistry& registry);
+    MainProvisioning(
+        uint32_t mainId,
+        LampRegistry& registry,
+        ProvisioningReservationStore* reservationStore = nullptr
+    );
 
     void startCommissioning();
     void stopCommissioning();
+    void expirePendingPairing(uint32_t now);
+    void abortPendingPairing();
     bool commissioningIsEnabled() const;
     uint8_t detectedCount() const;
+    bool hasUnpairedCandidate(const char* hardwareId) const;
+    bool canPairCandidate(const char* hardwareId) const;
+    bool pairingCapacityReached(const char* hardwareId) const;
+    void expireUnpairedCandidates(uint32_t now);
+    void clearUnpairedCandidates();
     DiscoveryResult discover(const ProvisioningPacket& announcement);
     bool createPairRequest(
         const char* hardwareId,
