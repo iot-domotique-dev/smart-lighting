@@ -7,6 +7,7 @@ import type { HealthResponse, LampRecord, ModuleRecord, PowerState, V7Id } from 
 import { StatusIndicator } from '../../components/StatusIndicator';
 import { LampCard } from './LampCard';
 import type { LampCommandFeedback } from './commandPolling';
+import { PairingScreen } from '../pairing/PairingScreen';
 
 const POLL_INTERVAL_MS = 20000;
 
@@ -17,8 +18,9 @@ interface Snapshot {
   receivedAt: number;
 }
 
-export function LampListScreen({ ip, onSettings, commandFeedback, onPower }: {
+export function LampListScreen({ ip, token, onSettings, commandFeedback, onPower }: {
   ip: string;
+  token: string;
   onSettings: () => void;
   commandFeedback: Record<string, LampCommandFeedback>;
   onPower: (lampId: V7Id, state: PowerState) => Promise<LampRecord | null>;
@@ -33,6 +35,7 @@ export function LampListScreen({ ip, onSettings, commandFeedback, onPower }: {
   const [detail, setDetail] = useState<LampRecord | null>(null);
   const [detailError, setDetailError] = useState('');
   const [detailLoading, setDetailLoading] = useState(false);
+  const [pairingOpen, setPairingOpen] = useState(false);
   const requestVersion = useRef(0);
   const detailVersion = useRef(0);
   const screenMounted = useRef(true);
@@ -181,6 +184,11 @@ export function LampListScreen({ ip, onSettings, commandFeedback, onPower }: {
           </Pressable>
         </View>
 
+        <Pressable onPress={() => setPairingOpen(true)} style={styles.addLampButton}
+          accessibilityRole="button" accessibilityLabel="Ajouter une lampe">
+          <Text style={styles.addLampText}>＋ Ajouter une lampe</Text>
+        </Pressable>
+
         {snapshot && old ? <View style={styles.staleBanner}>
           <Text style={styles.staleText}>Dernières données reçues. La disponibilité et les confirmations ne sont plus actualisées.</Text>
         </View> : null}
@@ -229,6 +237,8 @@ export function LampListScreen({ ip, onSettings, commandFeedback, onPower }: {
           </View>
         </View>
       </Modal>
+      {pairingOpen ? <PairingScreen ip={ip} token={token}
+        onClose={() => setPairingOpen(false)} onInventoryRefresh={() => void refresh(true)} /> : null}
     </View>
   );
 }
@@ -257,6 +267,9 @@ const styles = StyleSheet.create({
   sectionTitle: { color: '#172b36', fontSize: 20, fontWeight: '800' },
   sectionCaption: { color: '#8a999f', fontSize: 12, marginTop: 3 },
   refresh: { color: '#18785d', fontSize: 13, fontWeight: '800', padding: 8 },
+  addLampButton: { minHeight: 48, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: '#18785d', borderRadius: 14, marginBottom: 14 },
+  addLampText: { color: '#fff', fontSize: 14, fontWeight: '800' },
   staleBanner: { backgroundColor: '#fff0d8', padding: 13, borderRadius: 12, marginBottom: 14 },
   staleText: { color: '#825718', fontSize: 12, lineHeight: 18 },
   loader: { marginVertical: 30 },

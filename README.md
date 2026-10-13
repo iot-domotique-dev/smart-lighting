@@ -12,13 +12,14 @@ Projet de modules d’éclairage ESP32. V7.1 fournit un CORE logique composé de
 - **V7.4.1 validée en natif :** un scénario couvre le routage indépendant de deux lampes derrière le même MAIN; 86/86 tests passaient à cette étape. Le banc matériel utilisé ensuite ne comporte qu’une LAMP, donc le routage de deux lampes n’a pas été vérifié physiquement.
 - **V7.4.2 validée fonctionnellement sur matériel :** 92/92 tests natifs réussis et 4/4 profils C6 compilés. ON/OFF, ACK `executed`, cohérence HTTP, `confirmed → stale` hors ligne, reconnexion, expiration et `execution_unknown` ont été observés. `last_confirmed_state` est un historique logiciel, pas une mesure électrique; il redevient `unknown` au redémarrage du CORE-WIFI. Détails et IDs figurent dans le [dossier V7.4](docs/V7_4_RELIABILITY.md). L’image CORE-WIFI utilise 995 810 octets sur 1 Mio et laisse 52 766 octets.
 - **V7.5.1/V7.5.2 — application mobile :** l’application Android Expo SDK 57 consulte CORE-WIFI et pilote les lampes en ON/OFF via l’API existante. Le premier essai nominal a été confirmé par l’utilisateur avec une LED de test raccordée à GPIO18 d’une LAMP_C6. Le bilan logiciel et les limites matérielles restantes sont dans le [dossier V7.5](docs/V7_5_MOBILE_APP.md).
+- **V7.6.4 — ajout depuis l’application mobile :** l’utilisateur a confirmé l’ajout d’une LAMP_C6 depuis son téléphone, avec un seul MAIN. Cela valide le parcours nominal de pairing sur ce montage. La suppression depuis l’application, le multi-MAIN et plusieurs lampes physiques ne sont pas couverts; voir le [dossier V7.6](docs/V7_6_PAIRING.md).
 
 Le jeton de l’API de commande doit être défini dans le fichier local `include/wifi_credentials.h`; sans jeton valide, les routes de commande restent désactivées. Vérifier la marge flash CORE-WIFI après compilation avant flash matériel.
 
 ## Architecture
 
 ~~~text
-Application mobile Android (V7.5)
+Application mobile (V7.6.4)
              │ HTTP local /api/v1
              ▼
    C6-WIFI — registre CORE, IDs, Wi-Fi, API

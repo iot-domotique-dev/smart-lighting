@@ -182,7 +182,7 @@ export default function App() {
         <ActivityIndicator size="large" color="#18785d" />
         <Text style={styles.loadingText}>Ouverture de Smart Lighting…</Text>
       </View> : settings && !editing ?
-        <LampListScreen ip={settings.ip} onSettings={requestSettingsEdit}
+        <LampListScreen ip={settings.ip} token={settings.token} onSettings={requestSettingsEdit}
           commandFeedback={commandFeedback} onPower={sendPower} /> :
         <ConnectionScreen savedIp={settings?.ip} hasSavedToken={Boolean(settings?.token)}
           onSave={save} onCancel={settings ? () => setEditing(false) : undefined}

@@ -8,6 +8,14 @@ import type {
   HealthResponse,
   LampRecord,
   ModulesResponse,
+  PairingCandidatesResponse,
+  PairingOperationRequest,
+  PairingOperationResponse,
+  PairingOperationState,
+  PairingOperationSummary,
+  PairingOperationSubmissionResponse,
+  PairingSession,
+  PairingSessionResponse,
   PowerState,
   SubmitPowerResponse,
   V7Id,
@@ -61,7 +69,7 @@ function isDevice(value: unknown): value is DeviceRecord {
 }
 
 interface RequestOptions {
-  method?: 'GET' | 'POST';
+  method?: 'GET' | 'POST' | 'DELETE';
   token?: string;
   body?: string;
   signal?: AbortSignal;
@@ -90,9 +98,9 @@ async function requestJson(ip: string, path: string, options: RequestOptions = {
         signal: controller.signal,
       });
     } catch {
-      if (method === 'POST') {
+      if (method !== 'GET') {
         throw new CoreApiError('submission_uncertain',
-          'Réponse perdue après envoi : la commande a peut-être été reçue par le CORE.');
+          'Réponse perdue après envoi : la requête a peut-être été reçue par le CORE.');
       }
       if (controller.signal.aborted) {
         throw new CoreApiError('timeout', 'Le CORE ne répond pas dans le délai prévu.');
@@ -104,9 +112,9 @@ async function requestJson(ip: string, path: string, options: RequestOptions = {
     try {
       body = await response.json();
     } catch {
-      if (method === 'POST' && response.ok) {
+      if (method !== 'GET' && response.ok) {
         throw new CoreApiError('submission_uncertain',
-          'Le CORE a peut-être accepté la commande, mais sa réponse est illisible.');
+          'Le CORE a peut-être accepté la requête, mais sa réponse est illisible.');
       }
       throw new CoreApiError('invalid_response', 'Réponse JSON illisible du CORE.');
     }
@@ -208,6 +216,130 @@ export async function getCommand(ip: string, id: V7Id, token: string,
   return body as unknown as CommandStatusResponse;
 }
 
+const PAIRING_SESSION_STATES = [
+  'opening', 'active', 'closing', 'closed', 'expired', 'failed', 'uncertain',
+] as const;
+const PAIRING_OPERATION_STATES: readonly PairingOperationState[] = [
+  'pending', 'processing', 'succeeded', 'failed', 'rejected', 'expired', 'uncertain',
+];
+
+export function isValidPairingHardwareId(value: string): boolean {
+  return /^C6-[0-9A-Fa-f]{16}$/.test(value);
+}
+
+export function isValidPairingLampName(value: string): boolean {
+  return value.length >= 1 && value.length <= 31 && /^[A-Za-z0-9 _.'-]+$/.test(value);
+}
+
+function isPairingSession(value: unknown): value is PairingSession {
+  return isRecord(value) && isV7Id(value.id) &&
+    PAIRING_SESSION_STATES.includes(value.state as typeof PAIRING_SESSION_STATES[number]) &&
+    (value.duration_seconds === undefined ||
+      (Number.isInteger(value.duration_seconds) && Number(value.duration_seconds) >= 15 &&
+        Number(value.duration_seconds) <= 180)) &&
+    (value.candidate_count === undefined || (Number.isInteger(value.candidate_count) &&
+      Number(value.candidate_count) >= 0 && Number(value.candidate_count) <= 10)) &&
+    (value.candidate_limit_reached === undefined ||
+      typeof value.candidate_limit_reached === 'boolean');
+}
+
+function isPairingOperationSummary(value: unknown, complete: boolean): value is PairingOperationSummary {
+  if (!isRecord(value) || !isV7Id(value.id) || !isV7Id(value.session_id) ||
+      !isValidPairingHardwareId(String(value.hardware_id)) ||
+      !PAIRING_OPERATION_STATES.includes(value.state as PairingOperationState)) return false;
+  if (value.name !== undefined && typeof value.name !== 'string') return false;
+  if (value.result_code !== undefined && typeof value.result_code !== 'string') return false;
+  if (value.local_device_id !== undefined &&
+      (!Number.isInteger(value.local_device_id) || Number(value.local_device_id) < 0 ||
+        Number(value.local_device_id) > 0xffffffff)) return false;
+  return !complete || (typeof value.name === 'string' &&
+    typeof value.result_code === 'string' && Number.isInteger(value.local_device_id));
+}
+
+export async function getPairingSession(ip: string, token: string,
+  signal?: AbortSignal): Promise<PairingSessionResponse> {
+  const body = (await requestJson(ip, '/pairing/session', { token, signal })).body;
+  if (!isRecord(body) || !('session' in body) ||
+      (body.session !== null && !isPairingSession(body.session))) return invalidResponse();
+  return body as unknown as PairingSessionResponse;
+}
+
+export async function startPairingSession(ip: string, durationSeconds: number, token: string,
+  signal?: AbortSignal): Promise<PairingSessionResponse> {
+  if (!Number.isInteger(durationSeconds) || durationSeconds < 15 || durationSeconds > 180) {
+    return invalidResponse();
+  }
+  const { body, status } = await requestJson(ip, '/pairing/session', {
+    method: 'POST', token, body: JSON.stringify({ duration_seconds: durationSeconds }), signal,
+  });
+  const createdSession = isRecord(body) ? body.session : undefined;
+  if (status !== 202 || !isPairingSession(createdSession) ||
+      createdSession.state !== 'opening' || createdSession.duration_seconds !== durationSeconds) {
+    throw new CoreApiError('submission_uncertain',
+      'Réponse inattendue à la demande de recherche : relisez la session avant toute nouvelle demande.');
+  }
+  return body as unknown as PairingSessionResponse;
+}
+
+export async function getPairingCandidates(ip: string, token: string,
+  signal?: AbortSignal): Promise<PairingCandidatesResponse> {
+  const body = (await requestJson(ip, '/pairing/candidates', { token, signal })).body;
+  if (!isRecord(body) || !Number.isInteger(body.session_id) || Number(body.session_id) < 0 ||
+      Number(body.session_id) > 0xffffffff || typeof body.capacity_reached !== 'boolean' ||
+      !Array.isArray(body.candidates) || !body.candidates.every((candidate) =>
+        isRecord(candidate) && typeof candidate.hardware_id === 'string' &&
+        isValidPairingHardwareId(candidate.hardware_id) &&
+        Number.isInteger(candidate.capabilities) && Number(candidate.capabilities) >= 0 &&
+        Number(candidate.capabilities) <= 0xffffffff && Number.isInteger(candidate.last_seen_ms) &&
+        Number(candidate.last_seen_ms) >= 0 && Number(candidate.last_seen_ms) <= 0xffffffff) ||
+      body.candidates.length > 10 || body.count !== body.candidates.length) {
+    return invalidResponse();
+  }
+  return body as unknown as PairingCandidatesResponse;
+}
+
+export async function requestPairingOperation(ip: string, request: PairingOperationRequest,
+  token: string, signal?: AbortSignal): Promise<PairingOperationSubmissionResponse> {
+  if (!isV7Id(request.session_id) || !isV7Id(request.operation_id) ||
+      !isValidPairingHardwareId(request.hardware_id) ||
+      !isValidPairingLampName(request.name)) return invalidResponse();
+  const { body, status } = await requestJson(ip, '/pairing/operations', {
+    method: 'POST', token, body: JSON.stringify(request), signal,
+  });
+  const createdOperation = isRecord(body) ? body.operation : undefined;
+  if ((status !== 202 && status !== 200) || !isPairingOperationSummary(createdOperation, false) ||
+      createdOperation.id !== request.operation_id ||
+      createdOperation.session_id !== request.session_id ||
+      createdOperation.hardware_id !== request.hardware_id) {
+    throw new CoreApiError('submission_uncertain',
+      'Réponse inattendue à la demande d’appairage : consultez son identifiant avant toute autre action.');
+  }
+  return body as unknown as PairingOperationSubmissionResponse;
+}
+
+export async function getPairingOperation(ip: string, id: V7Id, token: string,
+  signal?: AbortSignal): Promise<PairingOperationResponse> {
+  if (!isV7Id(id)) return invalidResponse();
+  const body = (await requestJson(ip, `/pairing/operations/${id}`, { token, signal })).body;
+  if (!isRecord(body) || !isPairingOperationSummary(body.operation, true) ||
+      body.operation.id !== id) return invalidResponse();
+  return body as unknown as PairingOperationResponse;
+}
+
+export async function closePairingSession(ip: string, token: string,
+  signal?: AbortSignal): Promise<PairingSessionResponse> {
+  const { body, status } = await requestJson(ip, '/pairing/session', {
+    method: 'DELETE', token, signal,
+  });
+  const closingSession = isRecord(body) ? body.session : undefined;
+  if (status !== 202 || !isPairingSession(closingSession) ||
+      closingSession.state !== 'closing') {
+    throw new CoreApiError('submission_uncertain',
+      'La fermeture n’est pas confirmée : relisez l’état de la session.');
+  }
+  return body as unknown as PairingSessionResponse;
+}
+
 export function lampsOnly(devices: DeviceRecord[]): LampRecord[] {
   return devices.filter(isLamp);
 }
@@ -228,6 +360,15 @@ export function describeApiError(error: unknown): string {
       case 'transport_failure': return 'Le transport de commande du CORE est indisponible.';
       case 'tracker_full': return 'Le CORE ne peut pas suivre une autre commande actuellement.';
       case 'id_collision': return 'Le CORE n’a pas pu créer un identifiant de commande.';
+      case 'pairing_session_busy': return 'Une session ou une opération d’appairage est déjà active.';
+      case 'session_not_active': return 'La session de recherche n’est plus active. Actualisez son état.';
+      case 'candidate_not_found': return 'Cette candidate a disparu ou n’est plus disponible.';
+      case 'operation_not_found': return 'Le suivi d’appairage est introuvable; son résultat est incertain.';
+      case 'operation_id_conflict': return 'Identifiant d’opération déjà utilisé pour une autre demande.';
+      case 'session_not_closable': return 'La session ne peut pas être fermée maintenant. Vérifiez son état.';
+      case 'pairing_in_progress': return 'Un appairage est déjà en cours.';
+      case 'main_offline': return 'Le MAIN est hors ligne.';
+      case 'pairing_transport_uncertain': return 'Le transport est incertain. Consultez l’état avant de réessayer.';
       default: break;
     }
     return `Erreur HTTP ${error.status ?? '?'}${error.code ? ` (${error.code})` : ''}.`;

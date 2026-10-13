@@ -1,6 +1,6 @@
 # Documentation
 
-**V7.6.3 :** le pilotage HTTP du pairing est en cours de développement; il n’est pas encore validé sur matériel. Voir [le contrat et les limites V7.6](V7_6_PAIRING.md).
+**V7.6.4 :** l’utilisateur a confirmé sur son téléphone l’ajout d’une LAMP_C6 depuis l’application, avec un seul MAIN. Cette validation couvre le parcours nominal d’ajout; elle ne couvre ni la suppression depuis l’application ni plusieurs lampes physiques. Voir [le contrat, les limites et le résultat matériel V7.6](V7_6_PAIRING.md).
 
 Le [README du dépôt](../README.md) donne l’état du projet et les commandes courantes. Les documents ci-dessous sont les références techniques actives; chaque sujet a une seule page de détail.
 
@@ -16,7 +16,7 @@ Le [README du dépôt](../README.md) donne l’état du projet et les commandes 
 - [V7.3 — Commande HTTP locale](V7_3_HTTP_COMMANDS.md) : authentification Bearer, soumission de SET_POWER, consultation d’état, procédure et résultats de validation matérielle.
 - [V7.4 — Routage multi-lampes et état confirmé](V7_4_RELIABILITY.md) : validation native V7.4.1, résultat matériel V7.4.2, IDs des commandes et limites de cohérence.
 - [V7.5 — Application mobile](V7_5_MOBILE_APP.md) : consultation, commandes ON/OFF, validation logicielle et premier essai nominal sur sortie matérielle depuis Android.
-- [V7.6 — Appairage contrôlé des lampes](V7_6_PAIRING.md) : réservation V7.6.2, sessions de pairing pilotées par HTTP, candidates temporaires, capacités et préparation V7.6.4.
+- [V7.6 — Appairage contrôlé des lampes](V7_6_PAIRING.md) : réservation V7.6.2, sessions pilotées par HTTP, candidates temporaires, ajout depuis l’application V7.6.4 et résultat matériel rapporté.
 
 ## Tests
 

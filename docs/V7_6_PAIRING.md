@@ -2,9 +2,9 @@
 
 ## Périmètre et statut
 
-V7.6.1 audite le provisioning V5, V7.6.2 réserve durablement les IDs locaux, et V7.6.3 ajoute le pilotage du pairing depuis CORE-WIFI. Le parcours réutilise `MainProvisioning`, les confirmations V5, le registre CORE existant et les transports UART/Zigbee déjà en place.
+V7.6.1 audite le provisioning V5, V7.6.2 réserve durablement les IDs locaux, V7.6.3 ajoute le pilotage du pairing depuis CORE-WIFI et V7.6.4 fournit le parcours dans l’application mobile. Le parcours réutilise `MainProvisioning`, les confirmations V5, le registre CORE existant et les transports UART/Zigbee déjà en place.
 
-**V7.6.3 est une évolution firmware et HTTP. L’application mobile n’a pas encore d’écran d’appairage.** Aucun essai matériel du nouveau parcours HTTP n’est consigné par cette implémentation; les validations logicielles ci-dessous ne valent pas validation matérielle. La validation du pairing depuis Android est prévue en V7.6.4.
+**Le 13 octobre 2026, l’utilisateur a confirmé la réussite de l’ajout d’une lampe depuis l’application sur son téléphone.** L’essai concernait un seul MAIN_LIGHTING et une LAMP_C6. Les détails d’identification et les journaux de l’opération n’ont pas été communiqués.
 
 ## Validation logicielle V7.6.3
 
@@ -148,9 +148,17 @@ Le protocole UART CORE-WIFI↔CORE-ZIGBEE reçoit un nouveau type de message de 
 
 Pour utiliser les nouvelles routes, mettre à jour ensemble CORE-WIFI, CORE-ZIGBEE et MAIN_LIGHTING. LAMP_C6 conserve son firmware : le parcours V5 et ses messages radio ne changent pas. Aucune carte n’a été flashée dans le cadre du développement logiciel V7.6.3.
 
-## V7.6.4 — étape mobile prévue
+## V7.6.4 — ajout depuis l’application mobile
 
-L’écran mobile devra ouvrir/fermer une session, lire son état, actualiser les candidates pendant la session, permettre de choisir une candidate et son nom, créer un seul pairing à la fois, suivre son `operation_id`, afficher explicitement les résultats `uncertain` et `capacity`, puis actualiser l’inventaire après confirmation. L’application ne doit pas représenter une candidate comme une lampe déjà appairée et ne doit pas implémenter de suppression d’équipement.
+L’application Expo SDK 57 propose un parcours mobile qui ouvre explicitement une session, sélectionne une candidate par `hardware_id`, valide son nom, demande confirmation avant le POST de pairing, suit l’opération jusqu’à un état final et relit `/api/v1/devices` après succès. Elle ferme la session par DELETE puis attend la confirmation GET. Toutes les routes de pairing utilisent le Bearer token déjà conservé dans SecureStore. Aucune route ni aucun firmware ne sont modifiés par V7.6.4.
+
+Le typage, le lint, les **34/34 tests simulés**, `expo install --check` et l’export du bundle Android réussissent. La campagne automatisée avait utilisé Node 20.19, inférieur au minimum 22.13 requis, et npm avait signalé `EBADENGINE`; cette réserve concerne la reproductibilité des vérifications logicielles.
+
+### Résultat matériel rapporté — 13 octobre 2026
+
+L’utilisateur confirme avoir ajouté une LAMP_C6 depuis l’application mobile sur son téléphone après avoir rendu la lampe disponible pour un nouvel appairage. Cela valide le parcours nominal d’ajout depuis l’interface sur le matériel utilisé, avec un MAIN et une lampe. Le système a donc accepté la candidate et l’opération de pairing a abouti selon le retour utilisateur.
+
+Aucun `hardware_id`, `operation_id`, ID local attribué, capture d’écran ou journal série n’a été fourni pour cet essai; ces valeurs ne sont pas consignées. L’essai ne valide pas le retrait d’une lampe depuis l’application (fonctionnalité absente), l’utilisation iOS, le multi-MAIN, ni le pairing physique simultané de plusieurs lampes. Les identifiants d’opération restent en mémoire et peuvent être perdus si Android arrête complètement l’application. Le parcours détaillé est dans le [README mobile](../apps/mobile/README.md).
 
 ## Références
 

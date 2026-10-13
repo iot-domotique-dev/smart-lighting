@@ -84,6 +84,66 @@ export interface CommandStatusResponse {
   };
 }
 
+export type PairingSessionState = 'opening' | 'active' | 'closing' | 'closed' |
+  'expired' | 'failed' | 'uncertain';
+
+export interface PairingSession {
+  id: V7Id;
+  state: PairingSessionState;
+  duration_seconds?: number;
+  candidate_count?: number;
+  candidate_limit_reached?: boolean;
+}
+
+export interface PairingSessionResponse {
+  session: PairingSession | null;
+}
+
+export interface PairingCandidate {
+  hardware_id: string;
+  capabilities: number;
+  last_seen_ms: number;
+}
+
+export interface PairingCandidatesResponse {
+  session_id: number;
+  capacity_reached: boolean;
+  candidates: PairingCandidate[];
+  count: number;
+}
+
+export type PairingOperationState = 'pending' | 'processing' | 'succeeded' |
+  'failed' | 'rejected' | 'expired' | 'uncertain';
+
+export interface PairingOperationRequest {
+  session_id: V7Id;
+  operation_id: V7Id;
+  hardware_id: string;
+  name: string;
+}
+
+export interface PairingOperationSummary {
+  id: V7Id;
+  session_id: V7Id;
+  hardware_id: string;
+  state: PairingOperationState;
+  name?: string;
+  result_code?: string;
+  local_device_id?: number;
+}
+
+export interface PairingOperationSubmissionResponse {
+  operation: PairingOperationSummary;
+}
+
+export interface PairingOperationResponse {
+  operation: PairingOperationSummary & {
+    name: string;
+    result_code: string;
+    local_device_id: number;
+  };
+}
+
 export interface ApiErrorResponse {
   error: { code: string; message: string };
 }
