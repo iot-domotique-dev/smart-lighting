@@ -38,6 +38,14 @@ const char* messageTypeToString(
 
         case MessageType::PAIR_REJECT:
             return "PAIR_REJECT";
+        case MessageType::UNPAIR_REQUEST:
+            return "UNPAIR_REQUEST";
+        case MessageType::UNPAIR_CONFIRM:
+            return "UNPAIR_CONFIRM";
+        case MessageType::UNPAIR_COMMIT:
+            return "UNPAIR_COMMIT";
+        case MessageType::UNPAIR_REJECT:
+            return "UNPAIR_REJECT";
     }
 
     return "UNKNOWN";

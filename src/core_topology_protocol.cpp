@@ -68,12 +68,16 @@ bool coreAnnouncementFromZigbeeMessage(
         return copyBoundedName(packet.name, sizeof(packet.name), message.name);
     }
 
-    if (message.type == MessageType::DEVICE_ANNOUNCE && mainCoreId != 0 &&
+    if (message.type == MessageType::STATE && mainCoreId != 0 &&
         mainLocalId != 0 &&
+        message.commandType == CORE_TOPOLOGY_LAMP_ANNOUNCEMENT &&
+        message.sourceId == mainLocalId &&
+        message.destinationId == CORE_LOGICAL_ID &&
         message.deviceRole == static_cast<uint8_t>(DeviceRole::LAMP) &&
         message.pairingState == static_cast<uint8_t>(PairingState::PAIRED) &&
         message.provisioningDeviceId != 0 &&
-        message.parentMainId == mainLocalId) {
+        message.parentMainId == mainLocalId &&
+        message.hardwareId[0] != '\0') {
         packet.type = CoreLinkMessageType::MODULE_ANNOUNCEMENT;
         packet.localId = message.provisioningDeviceId;
         packet.parentId = mainCoreId;
@@ -82,6 +86,29 @@ bool coreAnnouncementFromZigbeeMessage(
         return copyBoundedName(packet.name, sizeof(packet.name), message.name);
     }
     return false;
+}
+
+bool makeCoreLampAnnouncementFromMain(uint32_t mainLocalId,
+                                      const ProvisioningPacket& lamp,
+                                      Message& message) {
+    if (mainLocalId == 0 || lamp.type != ProvisioningPacketType::DEVICE_ANNOUNCE ||
+        lamp.role != DeviceRole::LAMP || lamp.pairingState != PairingState::PAIRED ||
+        lamp.deviceId == 0 || lamp.parentMainId != mainLocalId ||
+        lamp.hardwareId[0] == '\0') return false;
+    message = {};
+    message.sourceId = mainLocalId;
+    message.destinationId = CORE_LOGICAL_ID;
+    message.type = MessageType::STATE;
+    message.commandType = CORE_TOPOLOGY_LAMP_ANNOUNCEMENT;
+    message.provisioningDeviceId = lamp.deviceId;
+    message.parentMainId = mainLocalId;
+    message.capabilities = lamp.capabilities;
+    message.deviceRole = static_cast<uint8_t>(DeviceRole::LAMP);
+    message.pairingState = static_cast<uint8_t>(PairingState::PAIRED);
+    if (!copyBoundedName(message.hardwareId, sizeof(message.hardwareId),
+                         lamp.hardwareId)) return false;
+    return copyBoundedName(message.name, sizeof(message.name),
+                           lamp.name[0] == '\0' ? "LAMP" : lamp.name);
 }
 
 bool makeCoreIdAssignedMessage(

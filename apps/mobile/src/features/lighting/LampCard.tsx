@@ -18,11 +18,13 @@ function feedbackText(feedback?: LampCommandFeedback): string | null {
   return `${feedback.message}${feedback.refreshError ? ` · Relecture impossible : ${feedback.refreshError}` : ''}`;
 }
 
-export function LampCard({ lamp, mainOnline, snapshotOld, feedback, onPress, onPower }: {
+export function LampCard({ lamp, mainOnline, snapshotOld, feedback,
+  powerBlockedByRemoval = false, onPress, onPower }: {
   lamp: LampRecord;
   mainOnline: boolean;
   snapshotOld: boolean;
   feedback?: LampCommandFeedback;
+  powerBlockedByRemoval?: boolean;
   onPress: () => void;
   onPower: (state: PowerState) => void;
 }) {
@@ -31,7 +33,7 @@ export function LampCard({ lamp, mainOnline, snapshotOld, feedback, onPress, onP
   const status = history.status === 'confirmed' ? 'Confirmé' :
     history.status === 'stale' ? 'À vérifier' : 'Inconnu';
   const busy = isCommandInProgress(feedback);
-  const canControl = !busy && !snapshotOld && lamp.online && mainOnline;
+  const canControl = !busy && !powerBlockedByRemoval && !snapshotOld && lamp.online && mainOnline;
   const message = feedbackText(feedback);
   const messageTone = feedback?.phase === 'failed' || feedback?.phase === 'rejected' ||
     feedback?.phase === 'uncertain' ? styles.commandError :
@@ -87,7 +89,8 @@ export function LampCard({ lamp, mainOnline, snapshotOld, feedback, onPress, onP
         </Pressable>
       </View>
       {!canControl && !busy ? <Text style={styles.disabledReason}>
-        {snapshotOld ? 'Actualisez la disponibilité avant de commander.' :
+        {powerBlockedByRemoval ? 'Retrait de cette lampe en cours.' :
+          snapshotOld ? 'Actualisez la disponibilité avant de commander.' :
           !lamp.online ? 'Lampe hors ligne.' : 'Vérifiez que son MAIN est en ligne.'}
       </Text> : null}
     </View>

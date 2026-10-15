@@ -8,7 +8,7 @@ V7.6.1 audite le provisioning V5, V7.6.2 réserve durablement les IDs locaux, V7
 
 ## Validation logicielle V7.6.3
 
-La suite native complète passe **110/110 tests**. Les profils PlatformIO `core_wifi_c6`, `core_zigbee_c6`, `main_light_c6` et `lamp_c6` ont tous été compilés intégralement; les quatre éditions de liens et créations d’images ont réussi. Aucun firmware n’a été flashé et le nouveau parcours n’est donc pas validé sur matériel.
+La suite native complète passe **110/110 tests**. Les profils PlatformIO `core_wifi_c6`, `core_zigbee_c6`, `main_light_c6` et `lamp_c6` ont tous été compilés intégralement; les quatre éditions de liens et créations d’images ont réussi. Au terme de cette vérification logicielle, aucun firmware n’avait été flashé; le résultat matériel rapporté ensuite est consigné plus bas.
 
 | Profil | RAM statique utilisée | Taille appli PlatformIO | Image `.bin` | Marge dans la partition appli |
 |---|---:|---:|---:|---:|
@@ -159,6 +159,35 @@ Le typage, le lint, les **34/34 tests simulés**, `expo install --check` et l’
 L’utilisateur confirme avoir ajouté une LAMP_C6 depuis l’application mobile sur son téléphone après avoir rendu la lampe disponible pour un nouvel appairage. Cela valide le parcours nominal d’ajout depuis l’interface sur le matériel utilisé, avec un MAIN et une lampe. Le système a donc accepté la candidate et l’opération de pairing a abouti selon le retour utilisateur.
 
 Aucun `hardware_id`, `operation_id`, ID local attribué, capture d’écran ou journal série n’a été fourni pour cet essai; ces valeurs ne sont pas consignées. L’essai ne valide pas le retrait d’une lampe depuis l’application (fonctionnalité absente), l’utilisation iOS, le multi-MAIN, ni le pairing physique simultané de plusieurs lampes. Les identifiants d’opération restent en mémoire et peuvent être perdus si Android arrête complètement l’application. Le parcours détaillé est dans le [README mobile](../apps/mobile/README.md).
+
+## Correctif — annonces des lampes du MAIN vers CORE-WIFI
+
+### Symptôme et cause
+
+Le pairing pouvait aboutir sur la lampe et MAIN_LIGHTING pouvait déjà commander celle-ci, alors que CORE-WIFI ne recevait que l’annonce du MAIN et que `GET /api/v1/devices` restait vide. Le relais de l’annonce de lampe est un message `STATE` adressé à l’ID logique du CORE. `ZigbeeRouteTable::destinationScope()` ne classait pas le type `CORE_TOPOLOGY_LAMP_ANNOUNCEMENT` comme une destination CORE. Le message cherchait donc une route locale; avec une lampe d’ID local 1, cette erreur pouvait aussi sélectionner la mauvaise portée.
+
+### Correctif et couverture
+
+`isCoreDestination()` classe maintenant cette annonce comme CORE. Aucun format UART ou Zigbee, protocole de pairing, registre, stockage NVS, route HTTP ou code mobile n’a été modifié. La correction est couverte par un test natif vérifiant la portée CORE, le routage vers la route CORE malgré une lampe locale d’ID 1, l’absence de fallback local quand la route CORE manque, et la conservation de l’ID local 11 et du parent MAIN dans le message relayé.
+
+Les suites natives ciblées exécutées passent : `test_core_link` 9/9, `test_v7_commands` 39/39 et `test_v4_pairing` 31/31, soit 79/79. Elles couvrent aussi les annonces MAIN, le routage ON/OFF et ACK, les règles de retrait déjà présentes et le pairing/restauration.
+
+La compilation complète de `main_light_c6` réussit. Le rapport PlatformIO indique 538 674 octets utilisés sur 1 966 080 octets de partition application (1 427 406 octets libres), et 33 940 octets RAM statique sur 327 680 (293 740 libres). Aucune carte n’a été flashée ni aucune donnée effacée pendant le développement de ce correctif.
+
+### Mise à jour matérielle
+
+La correction se trouve dans le chemin de routage de MAIN_LIGHTING : seul le profil `main_light_c6` doit être mis à jour. Conserver les firmwares CORE-WIFI, CORE-ZIGBEE et LAMP_C6 ainsi que leurs données; ne pas effacer la flash ou le provisioning et ne pas refaire le pairing. Après avoir identifié le port série de la carte MAIN, lancer dans PowerShell :
+
+```powershell
+pio run -e main_light_c6 -t upload --upload-port COMx
+pio device monitor -p COMx -b 115200
+```
+
+Remplacer `COMx` par le port de MAIN. Laisser la lampe appairée annoncer son état, vérifier dans le moniteur CORE-WIFI que son ID V7 apparaît, puis vérifier dans `GET /api/v1/devices` qu’elle est présente avec le parent MAIN attendu. Ne pas lancer `erase_flash`.
+
+### Résultat matériel rapporté — 15 octobre 2026
+
+L’utilisateur a confirmé depuis Android et sur matériel réel la découverte et l’ajout d’une LAMP_C6 derrière un MAIN, puis son pilotage ON/OFF. Ce parcours nominal confirme aussi que l’annonce de lampe corrigée rejoint l’inventaire CORE-WIFI. Aucun ID V7 ni journal série complet n’a été transmis pour archivage. La validation ne couvre ni plusieurs lampes simultanées, ni multi-MAIN, ni les pertes de transport et redémarrages pendant une transaction; le bilan complet du retrait et du réappairage est dans le [dossier V7.7](V7_7_UNPAIRING.md).
 
 ## Références
 

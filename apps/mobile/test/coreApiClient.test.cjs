@@ -13,7 +13,8 @@ require.extensions['.ts'] = (module, filename) => {
 };
 
 const { CoreApiError, describeApiError, getHealth, getCore, getModules, getDevices,
-  getDevice, getCommand, lampsOnly, submitPower } = require('../src/api/coreApiClient.ts');
+  getDevice, getCommand, getRemovalOperation, lampsOnly, requestDeviceRemoval,
+  submitPower } = require('../src/api/coreApiClient.ts');
 const { acquireLampCommand, pollCommand, releaseLampCommand } =
   require('../src/features/lighting/commandPolling.ts');
 const originalFetch = global.fetch;
@@ -107,6 +108,80 @@ test('POST ON et OFF utilisent la route existante et le Bearer token', async () 
     ['http://192.168.1.20/api/v1/devices/11/commands/power', 'POST', `Bearer ${token}`, 'on'],
     ['http://192.168.1.20/api/v1/devices/12/commands/power', 'POST', `Bearer ${token}`, 'off'],
   ]);
+});
+
+test('POST retrait envoie une seule requête avec ID V7, operation_id et Bearer', async () => {
+  const requests = [];
+  global.fetch = async (url, options) => {
+    requests.push({ url, options });
+    return respond({ operation: { id: 7001, device_id: 3559985816,
+      state: 'processing' } }, 202);
+  };
+  const response = await requestDeviceRemoval('192.168.1.20', 3559985816, 7001,
+    'test-token-123456789012345678901234');
+  assert.deepEqual(response.operation, { id: 7001, device_id: 3559985816,
+    state: 'processing' });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url,
+    'http://192.168.1.20/api/v1/devices/3559985816/removal-operations');
+  assert.equal(requests[0].options.method, 'POST');
+  assert.equal(requests[0].options.headers.Authorization,
+    'Bearer test-token-123456789012345678901234');
+  assert.deepEqual(JSON.parse(requests[0].options.body), { operation_id: 7001 });
+});
+
+test('POST retrait 503 uncertain est suivi sans relancer le POST', async () => {
+  let posts = 0;
+  global.fetch = async () => {
+    posts++;
+    return respond({ operation: { id: 7002, device_id: 3559985816,
+      state: 'uncertain' } }, 503);
+  };
+  const response = await requestDeviceRemoval('192.168.1.20', 3559985816, 7002,
+    'test-token-123456789012345678901234');
+  assert.equal(response.operation.state, 'uncertain');
+  assert.equal(posts, 1);
+});
+
+test('GET retrait valide processing/succeeded/failed/uncertain/not_found', async () => {
+  const requests = [];
+  const states = ['processing', 'succeeded', 'failed', 'uncertain', 'not_found'];
+  global.fetch = async (url, options) => {
+    requests.push([url, options.method, options.headers.Authorization]);
+    const state = states.shift();
+    return respond({ operation: { id: 7003, device_id: state === 'not_found' ? 0 : 3559985816,
+      state, result_code: state } });
+  };
+  for (const state of ['processing', 'succeeded', 'failed', 'uncertain', 'not_found']) {
+    const response = await getRemovalOperation('192.168.1.20', 7003, 3559985816,
+      'test-token-123456789012345678901234');
+    assert.equal(response.operation.state, state);
+  }
+  assert.equal(requests.length, 5);
+  assert.ok(requests.every(([url, method, authorization]) =>
+    url.endsWith('/api/v1/removal-operations/7003') && method === 'GET' &&
+    authorization === 'Bearer test-token-123456789012345678901234'));
+});
+
+test('GET retrait refuse un résultat associé à une autre lampe', async () => {
+  global.fetch = async () => respond({ operation: { id: 7004, device_id: 12,
+    state: 'succeeded', result_code: 'succeeded' } });
+  await assert.rejects(getRemovalOperation('192.168.1.20', 7004, 11,
+    'test-token-123456789012345678901234'),
+  (error) => error instanceof CoreApiError && error.kind === 'invalid_response');
+});
+
+test('rejet HTTP offline et Bearer invalide restent explicites', async () => {
+  global.fetch = async () => respond({ error: { code: 'offline', message: 'offline' } }, 409);
+  await assert.rejects(requestDeviceRemoval('192.168.1.20', 11, 7005,
+    'test-token-123456789012345678901234'),
+  (error) => error instanceof CoreApiError && error.status === 409 &&
+    describeApiError(error).includes('hors ligne'));
+  global.fetch = async () => respond({ error: { code: 'unauthorized', message: 'denied' } }, 401);
+  await assert.rejects(requestDeviceRemoval('192.168.1.20', 11, 7005,
+    'test-token-123456789012345678901234'),
+  (error) => error instanceof CoreApiError && error.status === 401 &&
+    describeApiError(error).includes('jeton'));
 });
 
 test('GET commande est authentifié et valide le suivi sent/accepted/executed', async () => {

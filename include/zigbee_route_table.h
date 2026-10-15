@@ -24,6 +24,8 @@ public:
     static CommunicationRouteScope destinationScope(const Message& message);
     void clear();
     void remember(const Message& message, uint16_t physicalSender);
+    bool forget(uint32_t logicalId, const char* hardwareId,
+                CommunicationRouteScope scope);
     bool find(const Message& message, uint16_t& address) const;
     bool find(uint32_t nextHop, CommunicationRouteScope scope,
               uint16_t& address) const;

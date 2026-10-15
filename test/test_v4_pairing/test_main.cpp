@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "provisioning.h"
+#include "core_module_service.h"
 #include "simulation_transport.h"
 
 FakeHardwareSerial Serial;
@@ -41,6 +42,12 @@ static bool completePairing(
         return false;
     }
     return true;
+}
+
+static void setPacketEnvelope(ProvisioningPacket& packet, uint32_t sourceId,
+                              uint32_t destinationId) {
+    packet.sourceId = sourceId;
+    packet.destinationId = destinationId;
 }
 
 static void savePairedLampRecord(
@@ -706,7 +713,7 @@ void test_reservation_state_from_another_main_disables_pairing() {
     TEST_ASSERT_EQUAL_UINT8(0, registry.count);
 }
 
-void test_incoherent_reservation_state_fails_closed_but_restores_legacy_lamp() {
+void test_incoherent_reservation_state_fails_closed_without_restoring_lamps() {
     CorruptProvisioningReservationStore reservations;
     LampRegistry registry;
     initLampRegistry(registry);
@@ -714,7 +721,7 @@ void test_incoherent_reservation_state_fails_closed_but_restores_legacy_lamp() {
     MemoryProvisioningStore legacyStorage;
     savePairedLampRecord(legacyStorage, "HW-LEGACY-SAFE", 1, 47);
     ProvisioningLamp legacy("HW-LEGACY-SAFE", "0.4.0", 0, legacyStorage);
-    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::RESTORED_PAIRED),
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::IDENTITY_CONFLICT),
                           static_cast<int>(main.discover(legacy.announce())));
 
     MemoryProvisioningStore candidateStorage;
@@ -723,8 +730,312 @@ void test_incoherent_reservation_state_fails_closed_but_restores_legacy_lamp() {
     main.startCommissioning();
     ProvisioningPacket request = {};
     TEST_ASSERT_FALSE(main.createPairRequest("HW-CANDIDATE", request));
+    TEST_ASSERT_EQUAL_UINT8(0, registry.count);
+}
+
+void test_removal_is_transactional_and_repair_gets_a_new_id() {
+    constexpr uint32_t MAIN_LOCAL_ID = 88;
+    LampRegistry registry;
+    initLampRegistry(registry);
+    MemoryProvisioningReservationStore reservations;
+    MainProvisioning main(MAIN_LOCAL_ID, registry, &reservations);
+    MemoryProvisioningStore firstStore;
+    MemoryProvisioningStore secondStore;
+    ProvisioningLamp first("C6-0000000000000001", "0.4.0", 0, firstStore);
+    ProvisioningLamp second("C6-0000000000000002", "0.4.0", 0, secondStore);
+    main.discover(first.announce());
+    main.discover(second.announce());
+    main.startCommissioning();
+    ProvisioningPacket firstConfirmation = {};
+    ProvisioningPacket secondConfirmation = {};
+    TEST_ASSERT_TRUE(completePairing(main, first, "C6-0000000000000001",
+                                    "FIRST", firstConfirmation));
+    TEST_ASSERT_TRUE(completePairing(main, second, "C6-0000000000000002",
+                                    "SECOND", secondConfirmation));
+    const ProvisioningPacket oldFirstAnnouncement = first.announce();
+    const uint32_t mainCoreId = makeCoreModuleId(CORE_LOGICAL_ID, MAIN_LOCAL_ID);
+    const uint32_t firstCoreId = makeCoreModuleId(mainCoreId, firstConfirmation.deviceId);
+
+    const uint32_t operationId = 0x12345678;
+    findLamp(registry, firstConfirmation.deviceId)->device.status =
+        DeviceStatus::OFFLINE;
+    TEST_ASSERT_FALSE(main.beginRemoval(operationId, firstConfirmation.deviceId,
+                                        firstCoreId));
+    findLamp(registry, firstConfirmation.deviceId)->device.status =
+        DeviceStatus::ONLINE;
+    TEST_ASSERT_TRUE(main.beginRemoval(operationId, firstConfirmation.deviceId,
+                                       firstCoreId));
+    TEST_ASSERT_FALSE(main.beginRemoval(operationId + 1,
+        secondConfirmation.deviceId,
+        makeCoreModuleId(mainCoreId, secondConfirmation.deviceId)));
+    TEST_ASSERT_TRUE(findLamp(registry, firstConfirmation.deviceId)
+                         ->identity.removalPending);
+    TEST_ASSERT_FALSE(findLamp(registry, secondConfirmation.deviceId)
+                          ->identity.removalPending);
+    TEST_ASSERT_EQUAL_UINT8(2, registry.count);
+
+    ProvisioningPacket request = {};
+    TEST_ASSERT_TRUE(main.buildRemovalPacket(request));
+    setPacketEnvelope(request, MAIN_LOCAL_ID, firstConfirmation.deviceId);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProvisioningPacketType::UNPAIR_REQUEST),
+                          static_cast<int>(request.type));
+    TEST_ASSERT_EQUAL_UINT32(operationId, request.transactionId);
+    TEST_ASSERT_EQUAL_UINT32(firstConfirmation.deviceId, request.deviceId);
+    TEST_ASSERT_EQUAL_UINT32(MAIN_LOCAL_ID, request.parentMainId);
+
+    ProvisioningPacket confirmation = {};
+    ProvisioningPacket wrong = request;
+    ++wrong.sourceId;
+    TEST_ASSERT_FALSE(first.handleUnpairRequest(wrong, confirmation));
+    wrong = request;
+    ++wrong.destinationId;
+    TEST_ASSERT_FALSE(first.handleUnpairRequest(wrong, confirmation));
+    wrong = request;
+    strcpy(wrong.hardwareId, "C6-00000000000000FF");
+    TEST_ASSERT_FALSE(first.handleUnpairRequest(wrong, confirmation));
+    wrong = request;
+    ++wrong.deviceId;
+    TEST_ASSERT_FALSE(first.handleUnpairRequest(wrong, confirmation));
+    wrong = request;
+    ++wrong.parentMainId;
+    TEST_ASSERT_FALSE(first.handleUnpairRequest(wrong, confirmation));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(PairingState::PAIRED),
+                          static_cast<int>(first.state()));
+
+    TEST_ASSERT_TRUE(first.handleUnpairRequest(request, confirmation));
+    setPacketEnvelope(confirmation, firstConfirmation.deviceId, MAIN_LOCAL_ID);
+    const ProvisioningPacket validConfirmation = confirmation;
+    wrong = request;
+    ++wrong.transactionId;
+    TEST_ASSERT_FALSE(first.handleUnpairRequest(wrong, confirmation));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProvisioningPacketType::UNPAIR_REJECT),
+                          static_cast<int>(confirmation.type));
+    confirmation = validConfirmation;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProvisioningPacketType::UNPAIR_CONFIRM),
+                          static_cast<int>(confirmation.type));
+    ProvisioningRecord absentRecord = {};
+    TEST_ASSERT_FALSE(firstStore.load(absentRecord));
+
+    ProvisioningPacket commit = {};
+    bool completed = false;
+    wrong = confirmation;
+    ++wrong.sourceId;
+    ProvisioningPacket rejectedCommit = {};
+    bool rejectedCompleted = false;
+    TEST_ASSERT_FALSE(main.reconcileRemovalPacket(
+        wrong, rejectedCommit, rejectedCompleted));
+    TEST_ASSERT_EQUAL_UINT8(2, registry.count);
+    TEST_ASSERT_TRUE(main.reconcileRemovalPacket(confirmation, commit, completed));
+    TEST_ASSERT_TRUE(completed);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProvisioningPacketType::UNPAIR_COMMIT),
+                          static_cast<int>(commit.type));
     TEST_ASSERT_EQUAL_UINT8(1, registry.count);
-    TEST_ASSERT_EQUAL_STRING("HW-LEGACY-SAFE", registry.lamps[0].identity.hardwareId);
+    TEST_ASSERT_NULL(findLamp(registry, firstConfirmation.deviceId));
+    TEST_ASSERT_NOT_NULL(findLamp(registry, secondConfirmation.deviceId));
+    MainProvisioningReservationState saved = {};
+    TEST_ASSERT_TRUE(reservations.load(MAIN_LOCAL_ID, saved));
+    TEST_ASSERT_EQUAL_UINT8(1, saved.count);
+    TEST_ASSERT_EQUAL_UINT8(MAIN_REMOVAL_SUCCEEDED, saved.removalState);
+    setPacketEnvelope(commit, MAIN_LOCAL_ID, firstConfirmation.deviceId);
+    wrong = commit;
+    ++wrong.sourceId;
+    TEST_ASSERT_FALSE(first.handleUnpairCommit(wrong));
+    TEST_ASSERT_TRUE(first.handleUnpairCommit(commit));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(PairingState::UNPAIRED),
+                          static_cast<int>(first.state()));
+    TEST_ASSERT_FALSE(first.handleUnpairCommit(commit));
+
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::IDENTITY_CONFLICT),
+        static_cast<int>(main.discover(oldFirstAnnouncement)));
+    TEST_ASSERT_EQUAL_UINT8(1, registry.count);
+
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::DUPLICATE_ANNOUNCEMENT),
+        static_cast<int>(main.discover(first.announce())));
+    main.startCommissioning();
+    ProvisioningPacket repairedConfirmation = {};
+    TEST_ASSERT_TRUE(completePairing(main, first, "C6-0000000000000001",
+                                    "FIRST_AGAIN", repairedConfirmation));
+    TEST_ASSERT_TRUE(repairedConfirmation.deviceId > firstConfirmation.deviceId);
+    TEST_ASSERT_FALSE(first.handleUnpairCommit(commit));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(PairingState::PAIRED),
+                          static_cast<int>(first.state()));
+    TEST_ASSERT_EQUAL_UINT8(2, registry.count);
+}
+
+void test_lost_removal_confirmation_reconciles_after_main_and_lamp_restart() {
+    constexpr uint32_t MAIN_LOCAL_ID = 89;
+    MemoryProvisioningReservationStore reservations;
+    MemoryProvisioningStore lampStore;
+    LampRegistry firstRegistry;
+    initLampRegistry(firstRegistry);
+    MainProvisioning firstMain(MAIN_LOCAL_ID, firstRegistry, &reservations);
+    ProvisioningLamp firstLamp("C6-0000000000000003", "0.4.0", 0, lampStore);
+    firstMain.discover(firstLamp.announce());
+    firstMain.startCommissioning();
+    ProvisioningPacket paired = {};
+    TEST_ASSERT_TRUE(completePairing(firstMain, firstLamp,
+        "C6-0000000000000003", "LAMP", paired));
+    const ProvisioningPacket stalePairedAnnouncement = firstLamp.announce();
+    const uint32_t mainCoreId = makeCoreModuleId(CORE_LOGICAL_ID, MAIN_LOCAL_ID);
+    const uint32_t lampCoreId = makeCoreModuleId(mainCoreId, paired.deviceId);
+    const uint32_t operationId = 0x87654321;
+    TEST_ASSERT_TRUE(firstMain.beginRemoval(operationId, paired.deviceId, lampCoreId));
+    ProvisioningPacket request = {};
+    TEST_ASSERT_TRUE(firstMain.buildRemovalPacket(request));
+    setPacketEnvelope(request, MAIN_LOCAL_ID, paired.deviceId);
+    ProvisioningPacket lostConfirmation = {};
+    TEST_ASSERT_TRUE(firstLamp.handleUnpairRequest(request, lostConfirmation));
+    setPacketEnvelope(lostConfirmation, paired.deviceId, MAIN_LOCAL_ID);
+
+    ProvisioningLamp restartedLamp("C6-0000000000000003", "0.4.0", 0, lampStore);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(PairingState::UNPAIRING),
+                          static_cast<int>(restartedLamp.state()));
+    LampRegistry restartedRegistry;
+    initLampRegistry(restartedRegistry);
+    MainProvisioning restartedMain(MAIN_LOCAL_ID, restartedRegistry, &reservations);
+    ProvisioningPacket evidence = restartedLamp.announce();
+    setPacketEnvelope(evidence, paired.deviceId, 0);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(PairingState::UNPAIRING),
+                          static_cast<int>(evidence.pairingState));
+    TEST_ASSERT_EQUAL_UINT32(operationId, evidence.transactionId);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::REMOVAL_PENDING),
+        static_cast<int>(restartedMain.discover(evidence)));
+
+    ProvisioningPacket commit = {};
+    bool completed = false;
+    TEST_ASSERT_TRUE(restartedMain.reconcileRemovalPacket(evidence, commit, completed));
+    TEST_ASSERT_TRUE(completed);
+    TEST_ASSERT_EQUAL_UINT8(0, restartedRegistry.count);
+    setPacketEnvelope(commit, MAIN_LOCAL_ID, paired.deviceId);
+    TEST_ASSERT_TRUE(restartedLamp.handleUnpairCommit(commit));
+
+    ProvisioningPacket duplicateCommit = {};
+    bool duplicateCompleted = false;
+    TEST_ASSERT_TRUE(restartedMain.reconcileRemovalPacket(
+        lostConfirmation, duplicateCommit, duplicateCompleted));
+    TEST_ASSERT_TRUE(duplicateCompleted);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProvisioningPacketType::UNPAIR_COMMIT),
+                          static_cast<int>(duplicateCommit.type));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::IDENTITY_CONFLICT),
+        static_cast<int>(restartedMain.discover(stalePairedAnnouncement)));
+    TEST_ASSERT_EQUAL_UINT8(0, restartedRegistry.count);
+}
+
+void test_lamp_clear_failure_keeps_binding_and_main_reservation() {
+    constexpr uint32_t MAIN_LOCAL_ID = 90;
+    LampRegistry registry;
+    initLampRegistry(registry);
+    MemoryProvisioningReservationStore reservations;
+    MemoryProvisioningStore lampStore;
+    MainProvisioning main(MAIN_LOCAL_ID, registry, &reservations);
+    ProvisioningLamp lamp("C6-0000000000000004", "0.4.0", 0, lampStore);
+    main.discover(lamp.announce());
+    main.startCommissioning();
+    ProvisioningPacket paired = {};
+    TEST_ASSERT_TRUE(completePairing(main, lamp, "C6-0000000000000004",
+                                    "LAMP", paired));
+    const uint32_t mainCoreId = makeCoreModuleId(CORE_LOGICAL_ID, MAIN_LOCAL_ID);
+    const uint32_t lampCoreId = makeCoreModuleId(mainCoreId, paired.deviceId);
+    TEST_ASSERT_TRUE(main.beginRemoval(0x11112222, paired.deviceId, lampCoreId));
+    ProvisioningPacket request = {};
+    TEST_ASSERT_TRUE(main.buildRemovalPacket(request));
+    setPacketEnvelope(request, MAIN_LOCAL_ID, paired.deviceId);
+    lampStore.setFailWrites(true);
+    ProvisioningPacket rejection = {};
+    TEST_ASSERT_FALSE(lamp.handleUnpairRequest(request, rejection));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProvisioningPacketType::UNPAIR_REJECT),
+                          static_cast<int>(rejection.type));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(PairingState::PAIRED),
+                          static_cast<int>(lamp.state()));
+    TEST_ASSERT_EQUAL_UINT8(1, registry.count);
+
+    ProvisioningPacket ignored = {};
+    bool completed = false;
+    setPacketEnvelope(rejection, paired.deviceId, MAIN_LOCAL_ID);
+    TEST_ASSERT_TRUE(main.reconcileRemovalPacket(rejection, ignored, completed));
+    TEST_ASSERT_FALSE(completed);
+    MainProvisioningReservationState saved = {};
+    TEST_ASSERT_TRUE(reservations.load(MAIN_LOCAL_ID, saved));
+    TEST_ASSERT_EQUAL_UINT8(MAIN_REMOVAL_FAILED, saved.removalState);
+    TEST_ASSERT_EQUAL_UINT8(1, saved.count);
+}
+
+void test_main_write_failure_does_not_start_lamp_removal() {
+    constexpr uint32_t MAIN_LOCAL_ID = 91;
+    LampRegistry registry;
+    initLampRegistry(registry);
+    MemoryProvisioningReservationStore reservations;
+    MainProvisioning main(MAIN_LOCAL_ID, registry, &reservations);
+    MemoryProvisioningStore lampStore;
+    ProvisioningLamp lamp("C6-0000000000000005", "0.4.0", 0, lampStore);
+    main.discover(lamp.announce());
+    main.startCommissioning();
+    ProvisioningPacket paired = {};
+    TEST_ASSERT_TRUE(completePairing(main, lamp, "C6-0000000000000005",
+                                    "LAMP", paired));
+    const uint32_t mainCoreId = makeCoreModuleId(CORE_LOGICAL_ID, MAIN_LOCAL_ID);
+    const uint32_t lampCoreId = makeCoreModuleId(mainCoreId, paired.deviceId);
+    reservations.setFailWrites(true);
+    TEST_ASSERT_FALSE(main.beginRemoval(0x33334444, paired.deviceId, lampCoreId));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(PairingState::PAIRED),
+                          static_cast<int>(lamp.state()));
+    TEST_ASSERT_EQUAL_UINT8(1, registry.count);
+}
+
+void test_v76_reservation_blob_migration_is_explicit_and_validated() {
+    MainProvisioningReservationStateV1 legacy = {};
+    legacy.version = 1;
+    legacy.count = 1;
+    legacy.mainId = 92;
+    legacy.highWaterDeviceId = 11;
+    legacy.identities[0].deviceId = 11;
+    strcpy(legacy.identities[0].hardwareId, "C6-0000000000000006");
+    MainProvisioningReservationState migrated = {};
+    TEST_ASSERT_TRUE(migrateMainProvisioningReservationStateV1(
+        legacy, 92, migrated));
+    TEST_ASSERT_EQUAL_UINT8(MAIN_PROVISIONING_STATE_VERSION, migrated.version);
+    TEST_ASSERT_EQUAL_UINT8(1, migrated.count);
+    TEST_ASSERT_EQUAL_UINT32(11, migrated.highWaterDeviceId);
+    TEST_ASSERT_EQUAL_STRING(legacy.identities[0].hardwareId,
+                             migrated.identities[0].hardwareId);
+    legacy.reserved = 1;
+    TEST_ASSERT_FALSE(migrateMainProvisioningReservationStateV1(
+        legacy, 92, migrated));
+}
+
+void test_removal_of_legacy_id_sets_tombstone_and_rejects_late_announce() {
+    constexpr uint32_t MAIN_LOCAL_ID = 93;
+    LampRegistry registry;
+    initLampRegistry(registry);
+    MemoryProvisioningReservationStore reservations;
+    MainProvisioning main(MAIN_LOCAL_ID, registry, &reservations);
+    MemoryProvisioningStore lampStore;
+    savePairedLampRecord(lampStore, "C6-0000000000000007", 1, MAIN_LOCAL_ID);
+    ProvisioningLamp lamp("C6-0000000000000007", "0.4.0", 0, lampStore);
+    const ProvisioningPacket oldAnnouncement = lamp.announce();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::RESTORED_PAIRED),
+        static_cast<int>(main.discover(oldAnnouncement)));
+
+    const uint32_t mainCoreId = makeCoreModuleId(CORE_LOGICAL_ID, MAIN_LOCAL_ID);
+    const uint32_t lampCoreId = makeCoreModuleId(mainCoreId, 1);
+    TEST_ASSERT_TRUE(main.beginRemoval(0x45454545, 1, lampCoreId));
+    ProvisioningPacket request = {};
+    TEST_ASSERT_TRUE(main.buildRemovalPacket(request));
+    setPacketEnvelope(request, MAIN_LOCAL_ID, 1);
+    ProvisioningPacket confirmation = {};
+    TEST_ASSERT_TRUE(lamp.handleUnpairRequest(request, confirmation));
+    setPacketEnvelope(confirmation, 1, MAIN_LOCAL_ID);
+    ProvisioningPacket commit = {};
+    bool completed = false;
+    TEST_ASSERT_TRUE(main.reconcileRemovalPacket(confirmation, commit, completed));
+    TEST_ASSERT_TRUE(completed);
+    setPacketEnvelope(commit, MAIN_LOCAL_ID, 1);
+    MainProvisioningReservationState state = {};
+    TEST_ASSERT_TRUE(reservations.load(MAIN_LOCAL_ID, state));
+    TEST_ASSERT_EQUAL_UINT16(1, state.retiredLegacyIds & 1U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::IDENTITY_CONFLICT),
+        static_cast<int>(main.discover(oldAnnouncement)));
+    TEST_ASSERT_EQUAL_UINT8(0, registry.count);
 }
 
 void test_pairing_capacity_is_rejected_before_new_reservation() {
@@ -835,8 +1146,14 @@ int main() {
     RUN_TEST(test_invalid_pair_confirm_does_not_change_registry_or_pending_pair);
     RUN_TEST(test_reservation_write_failure_blocks_new_pairing_and_keeps_existing_lamp);
     RUN_TEST(test_reservation_state_from_another_main_disables_pairing);
-    RUN_TEST(test_incoherent_reservation_state_fails_closed_but_restores_legacy_lamp);
+    RUN_TEST(test_incoherent_reservation_state_fails_closed_without_restoring_lamps);
     RUN_TEST(test_pairing_capacity_is_rejected_before_new_reservation);
     RUN_TEST(test_unpaired_candidate_expires_without_changing_paired_registry);
+    RUN_TEST(test_removal_is_transactional_and_repair_gets_a_new_id);
+    RUN_TEST(test_lost_removal_confirmation_reconciles_after_main_and_lamp_restart);
+    RUN_TEST(test_lamp_clear_failure_keeps_binding_and_main_reservation);
+    RUN_TEST(test_main_write_failure_does_not_start_lamp_removal);
+    RUN_TEST(test_v76_reservation_blob_migration_is_explicit_and_validated);
+    RUN_TEST(test_removal_of_legacy_id_sets_tombstone_and_rejects_late_announce);
     return UNITY_END();
 }

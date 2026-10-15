@@ -1,10 +1,10 @@
 # Documentation
 
-**V7.6.4 :** l’utilisateur a confirmé sur son téléphone l’ajout d’une LAMP_C6 depuis l’application, avec un seul MAIN. Cette validation couvre le parcours nominal d’ajout; elle ne couvre ni la suppression depuis l’application ni plusieurs lampes physiques. Voir [le contrat, les limites et le résultat matériel V7.6](V7_6_PAIRING.md).
+**V7.7.2/V7.7.3 — clôture nominale, 15 octobre 2026 :** l’utilisateur confirme sur Android et matériel réel la découverte, le nommage, l’appairage, ON/OFF, le retrait depuis l’application, le réappairage avec un nouvel ID V7 et la persistance après redémarrage. Ce résultat couvre un MAIN et une LAMP. Les 119 tests firmware natifs et 56 tests mobiles simulés, lint, typage et export Android avaient réussi. Les scénarios de panne, concurrence et plusieurs lampes simultanées restent hors validation. Voir [le protocole, la persistance, les routes, le client mobile et les limites V7.7](V7_7_UNPAIRING.md).
 
 Le [README du dépôt](../README.md) donne l’état du projet et les commandes courantes. Les documents ci-dessous sont les références techniques actives; chaque sujet a une seule page de détail.
 
-**Statut au 9 octobre 2026 : V7.4.2 est validée fonctionnellement sur le montage à quatre ESP32-C6**, avec un CORE logique, un MAIN et une LAMP. Les ON/OFF et états HTTP confirmés, les transitions offline/reconnexion et l’expiration avec `execution_unknown` ont été observés sur matériel. **92 tests natifs passent et les quatre profils C6 compilent.** V7.4.1 couvre le routage de deux lampes en simulation native; le banc matériel ne contenait qu’une lampe. V7.5.1 et V7.5.2 sont documentées, avec un premier essai nominal de commande depuis Android rapporté par l’utilisateur.
+**Bilan matériel V7.4.2 du 9 octobre 2026 :** cette version a été validée fonctionnellement sur le montage à quatre ESP32-C6, avec un CORE logique, un MAIN et une LAMP. Les ON/OFF et états HTTP confirmés, les transitions offline/reconnexion et l’expiration avec `execution_unknown` ont été observés sur matériel. À cette étape, 92 tests natifs passaient et les quatre profils C6 compilaient. V7.4.1 couvre le routage de deux lampes en simulation native; le banc matériel ne contenait qu’une lampe. V7.5.1 et V7.5.2 sont documentées, avec un premier essai nominal de commande depuis Android rapporté par l’utilisateur.
 
 ## Références actives
 
@@ -16,13 +16,14 @@ Le [README du dépôt](../README.md) donne l’état du projet et les commandes 
 - [V7.3 — Commande HTTP locale](V7_3_HTTP_COMMANDS.md) : authentification Bearer, soumission de SET_POWER, consultation d’état, procédure et résultats de validation matérielle.
 - [V7.4 — Routage multi-lampes et état confirmé](V7_4_RELIABILITY.md) : validation native V7.4.1, résultat matériel V7.4.2, IDs des commandes et limites de cohérence.
 - [V7.5 — Application mobile](V7_5_MOBILE_APP.md) : consultation, commandes ON/OFF, validation logicielle et premier essai nominal sur sortie matérielle depuis Android.
-- [V7.6 — Appairage contrôlé des lampes](V7_6_PAIRING.md) : réservation V7.6.2, sessions pilotées par HTTP, candidates temporaires, ajout depuis l’application V7.6.4 et résultat matériel rapporté.
+- [V7.6 — Appairage contrôlé des lampes](V7_6_PAIRING.md) : réservation V7.6.2, sessions pilotées par HTTP, candidates temporaires, ajout depuis l’application V7.6.4, correctif de routage et résultat matériel rapporté.
+- [V7.7 — Désappairage sécurisé](V7_7_UNPAIRING.md) : transaction persistante et réconciliable, migration additive du journal MAIN, routes HTTP, client Android V7.7.3, validation nominale et essais restant à faire.
 
 ## Tests
 
 Les suites natives et leur périmètre sont décrits dans le [README des tests](../test/README).
 
-Les 92 tests natifs couvrent la logique et les codecs, dont le routage en présence d’identifiants locaux identiques, le suivi d’état confirmé et les réponses HTTP additives. Ils ne remplacent pas les essais radio, UART, Wi-Fi et HTTP sur carte; le dossier V7.4 distingue les preuves matérielles rapportées et les limites qui restent.
+Les tests natifs couvrent la logique d’appairage/retrait, les codecs et l’API CORE existante. Les routes HTTP V7.7 de retrait ne disposent pas d’un test de serveur HTTP natif dédié; l’authentification Bearer commune est couverte par ses tests utilitaires. Les tests natifs ne remplacent pas les essais radio, UART, Wi-Fi et HTTP sur carte.
 
 ## V7.3 — Commande HTTP locale
 

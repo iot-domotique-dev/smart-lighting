@@ -9,7 +9,11 @@ enum class ProvisioningPacketType : uint8_t {
     PAIR_REQUEST,
     PAIR_ACCEPT,
     PAIR_CONFIRM,
-    PAIR_REJECT
+    PAIR_REJECT,
+    UNPAIR_REQUEST,
+    UNPAIR_CONFIRM,
+    UNPAIR_COMMIT,
+    UNPAIR_REJECT
 };
 
 struct ProvisioningPacket {
@@ -22,6 +26,10 @@ struct ProvisioningPacket {
     uint32_t parentMainId;
     char name[LAMP_NAME_LENGTH];
     PairingState pairingState;
+    uint32_t transactionId;
+    /* Transport envelope copied from Message; not serialized a second time. */
+    uint32_t sourceId;
+    uint32_t destinationId;
 };
 
 enum class DiscoveryResult : uint8_t {
@@ -32,7 +40,9 @@ enum class DiscoveryResult : uint8_t {
     RECOGNIZED_PAIRED,
     RESTORED_PAIRED,
     IDENTITY_CONFLICT,
-    CANDIDATE_CAPACITY
+    CANDIDATE_CAPACITY,
+    REMOVAL_PENDING,
+    REMOVAL_RECONCILED
 };
 
 constexpr uint32_t PROVISIONING_TRANSACTION_TIMEOUT_MS = 30000;
@@ -44,10 +54,14 @@ private:
     uint32_t capabilities;
     ProvisioningStore& store;
     ProvisioningRecord configuration;
+    LampRemovalReceipt removalReceipt;
     PairingState pairingState;
     uint32_t pendingMainId;
     uint32_t pendingStartedAt;
     bool hasPendingRequest;
+    bool hasRemovalReceipt;
+
+    bool finishPreparedRemoval();
 
 public:
     ProvisioningLamp(
@@ -66,6 +80,10 @@ public:
         const ProvisioningPacket& acceptance,
         ProvisioningPacket& confirmation
     );
+    bool handleUnpairRequest(const ProvisioningPacket& request,
+                             ProvisioningPacket& confirmation);
+    bool handleUnpairCommit(const ProvisioningPacket& commit);
+    bool retryPreparedRemoval(ProvisioningPacket& confirmation);
     void expirePendingRequest(uint32_t now);
     PairingState state() const;
 };
@@ -125,6 +143,21 @@ public:
         ProvisioningPacket& acceptance
     );
     bool confirmPairing(const ProvisioningPacket& confirmation);
+
+    bool beginRemoval(uint32_t operationId, uint32_t deviceId,
+                     uint32_t coreDeviceId);
+    bool buildRemovalPacket(ProvisioningPacket& packet) const;
+    bool reconcileRemovalPacket(const ProvisioningPacket& packet,
+                                ProvisioningPacket& response,
+                                bool& removalCompleted);
+    bool getRemovalStatus(uint32_t operationId,
+                          MainProvisioningReservationState& state) const;
+    bool isRemovalTarget(uint32_t deviceId) const;
+    bool isRemovedIdentity(uint32_t deviceId, const char* hardwareId) const;
+    bool hasActiveRemoval() const;
+    uint32_t removalOperationId() const;
+    uint32_t removalDeviceId() const;
+    uint8_t removalState() const;
 };
 
 /* Codec keeps provisioning packets on the existing Communication transport. */

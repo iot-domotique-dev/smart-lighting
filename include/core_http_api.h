@@ -26,11 +26,19 @@ private:
     const char* apiToken;
     SemaphoreHandle_t* registryMutex;
     CorePairingState pairing;
+    uint32_t removalOperationId;
+    uint32_t removalTargetId;
+    uint32_t removalMainLocalId;
+    uint32_t removalMainCoreId;
+    uint32_t removalLampLocalId;
+    uint32_t removalLastQueryAt;
+    CorePairingResultCode removalResult;
     bool started;
 #if defined(SMART_LIGHTING_CORE_WIFI)
     httpd_handle_t server;
     static esp_err_t handleRequest(httpd_req_t* request);
     esp_err_t handlePairingRequest(httpd_req_t* request);
+    esp_err_t handleRemovalRequest(httpd_req_t* request);
 #endif
 
 public:

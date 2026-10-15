@@ -256,22 +256,44 @@ void test_repeated_announcement_updates_without_duplicate_and_conflict_is_reject
 void test_paired_lamp_announcement_uses_core_assigned_main_parent_id() {
     const uint32_t mainLocalId = 0x12345678;
     const uint32_t mainCoreId = makeCoreModuleId(CORE_LOGICAL_ID, mainLocalId);
+    ProvisioningPacket pairedLamp = {};
+    pairedLamp.type = ProvisioningPacketType::DEVICE_ANNOUNCE;
+    pairedLamp.role = DeviceRole::LAMP;
+    pairedLamp.pairingState = PairingState::PAIRED;
+    pairedLamp.deviceId = 17;
+    pairedLamp.parentMainId = mainLocalId;
+    pairedLamp.capabilities = DEVICE_CAP_POWER | DEVICE_CAP_LIGHTING;
+    strncpy(pairedLamp.hardwareId, "C6-0123456789ABCDEF",
+            sizeof(pairedLamp.hardwareId) - 1);
+    strncpy(pairedLamp.name, "LAMP_C6", sizeof(pairedLamp.name) - 1);
     Message lampAnnouncement = {};
-    lampAnnouncement.type = MessageType::DEVICE_ANNOUNCE;
+    TEST_ASSERT_TRUE(makeCoreLampAnnouncementFromMain(
+        mainLocalId, pairedLamp, lampAnnouncement));
     lampAnnouncement.id = 77;
-    lampAnnouncement.sourceId = 17;
-    lampAnnouncement.deviceRole = static_cast<uint8_t>(DeviceRole::LAMP);
-    lampAnnouncement.pairingState = static_cast<uint8_t>(PairingState::PAIRED);
-    lampAnnouncement.provisioningDeviceId = 17;
-    lampAnnouncement.parentMainId = mainLocalId;
-    lampAnnouncement.capabilities = DEVICE_CAP_POWER | DEVICE_CAP_LIGHTING;
-    strncpy(lampAnnouncement.name, "LAMP_C6", sizeof(lampAnnouncement.name) - 1);
 
     CoreLinkPacket packet = {};
     TEST_ASSERT_TRUE(coreAnnouncementFromZigbeeMessage(
         lampAnnouncement, mainCoreId, mainLocalId, packet));
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(CoreLinkMessageType::MODULE_ANNOUNCEMENT),
+        static_cast<uint8_t>(packet.type));
     TEST_ASSERT_EQUAL_UINT32(mainCoreId, packet.parentId);
     TEST_ASSERT_EQUAL_UINT32(17, packet.localId);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DeviceRole::LAMP), packet.role);
+    TEST_ASSERT_EQUAL_STRING("LAMP_C6", packet.name);
+
+    Message rawLampAnnouncement = {};
+    rawLampAnnouncement.type = MessageType::DEVICE_ANNOUNCE;
+    rawLampAnnouncement.sourceId = pairedLamp.deviceId;
+    rawLampAnnouncement.deviceRole = static_cast<uint8_t>(DeviceRole::LAMP);
+    rawLampAnnouncement.pairingState = static_cast<uint8_t>(PairingState::PAIRED);
+    rawLampAnnouncement.provisioningDeviceId = pairedLamp.deviceId;
+    rawLampAnnouncement.parentMainId = mainLocalId;
+    strcpy(rawLampAnnouncement.hardwareId, pairedLamp.hardwareId);
+    TEST_ASSERT_FALSE(coreAnnouncementFromZigbeeMessage(
+        rawLampAnnouncement, mainCoreId, mainLocalId, packet));
+    TEST_ASSERT_TRUE(coreAnnouncementFromZigbeeMessage(
+        lampAnnouncement, mainCoreId, mainLocalId, packet));
 
     DeviceRegistry registry;
     initRegistryWithCoreRoot(registry);
@@ -283,6 +305,8 @@ void test_paired_lamp_announcement_uses_core_assigned_main_parent_id() {
     main.parentId = CORE_LOGICAL_ID;
     main.localId = mainLocalId;
     TEST_ASSERT_TRUE(registerDevice(registry, main));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DeviceRole::MAIN),
+        static_cast<uint8_t>(findDeviceById(registry, mainCoreId)->role));
 
     CoreLinkPacket response = {};
     TEST_ASSERT_EQUAL_INT(
@@ -376,6 +400,53 @@ void test_uart_pairing_candidate_operation_and_result_round_trip() {
     TEST_ASSERT_EQUAL_UINT8(0xA5, bytes[16]);
 }
 
+void test_uart_removal_messages_round_trip_and_reject_missing_identity() {
+    CoreLinkPacket input = {};
+    input.type = CoreLinkMessageType::PAIRING;
+    input.localId = 21;
+    input.parentId = 0x12340001;
+    input.operationId = 0x76543210;
+    input.deviceId = 11;
+    input.coreId = makeCoreModuleId(input.parentId, input.deviceId);
+    input.pairingAction = CoreLinkPairingAction::REMOVE_DEVICE;
+
+    uint8_t bytes[CORE_LINK_MAX_FRAME_SIZE] = {};
+    size_t length = encode(input, bytes, sizeof(bytes));
+    TEST_ASSERT_GREATER_THAN_UINT(0, length);
+    CoreLinkPacket output = {};
+    TEST_ASSERT_TRUE(decodeCoreLinkFrame(bytes, length, output));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(input.pairingAction),
+                            static_cast<uint8_t>(output.pairingAction));
+    TEST_ASSERT_EQUAL_UINT32(input.operationId, output.operationId);
+    TEST_ASSERT_EQUAL_UINT32(input.parentId, output.parentId);
+    TEST_ASSERT_EQUAL_UINT32(input.deviceId, output.deviceId);
+    TEST_ASSERT_EQUAL_UINT32(input.coreId, output.coreId);
+
+    input.pairingAction = CoreLinkPairingAction::QUERY_REMOVAL;
+    input.deviceId = 0;
+    input.coreId = 0;
+    length = encode(input, bytes, sizeof(bytes));
+    TEST_ASSERT_GREATER_THAN_UINT(0, length);
+    TEST_ASSERT_TRUE(decodeCoreLinkFrame(bytes, length, output));
+    TEST_ASSERT_EQUAL_UINT32(input.operationId, output.operationId);
+
+    input.pairingAction = CoreLinkPairingAction::REMOVAL_RESULT;
+    input.pairingResult = CorePairingResultCode::SUCCEEDED;
+    input.deviceId = 11;
+    input.coreId = makeCoreModuleId(input.parentId, input.deviceId);
+    strncpy(input.hardwareId, "C6-0123456789ABCDEF", sizeof(input.hardwareId) - 1);
+    length = encode(input, bytes, sizeof(bytes));
+    TEST_ASSERT_GREATER_THAN_UINT(0, length);
+    TEST_ASSERT_TRUE(decodeCoreLinkFrame(bytes, length, output));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CorePairingResultCode::SUCCEEDED),
+                          static_cast<int>(output.pairingResult));
+    TEST_ASSERT_EQUAL_STRING(input.hardwareId, output.hardwareId);
+
+    input.deviceId = 0;
+    input.coreId = 0;
+    TEST_ASSERT_EQUAL_UINT(0, encode(input, bytes, sizeof(bytes)));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_uart_announcement_frame_round_trip);
@@ -386,5 +457,6 @@ int main(int, char**) {
     RUN_TEST(test_paired_lamp_announcement_uses_core_assigned_main_parent_id);
     RUN_TEST(test_lamp_reannouncement_preserves_state_only_for_same_v7_identity);
     RUN_TEST(test_uart_pairing_candidate_operation_and_result_round_trip);
+    RUN_TEST(test_uart_removal_messages_round_trip_and_reject_missing_identity);
     return UNITY_END();
 }

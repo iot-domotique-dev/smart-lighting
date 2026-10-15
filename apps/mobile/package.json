@@ -5,6 +5,7 @@
   "dependencies": {
     "expo": "~57.0.28",
     "expo-build-properties": "~57.0.22",
+    "expo-crypto": "~57.0.4",
     "expo-dev-client": "~57.0.20",
     "expo-secure-store": "~57.0.4",
     "expo-status-bar": "~57.0.1",
@@ -23,7 +24,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "test:api": "node --test test/coreApiClient.test.cjs test/pairingWorkflow.test.cjs",
+    "test:api": "node --test test/coreApiClient.test.cjs test/pairingWorkflow.test.cjs test/removalWorkflow.test.cjs",
     "lint": "expo lint"
   },
   "private": true,

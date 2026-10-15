@@ -925,6 +925,31 @@ void test_core_refuses_offline_lamp_or_main_without_transmitting() {
     TEST_ASSERT_EQUAL_UINT8(0, network.coreTracker.count);
 }
 
+void test_removal_guard_is_lamp_scoped_and_blocks_unknown_execution() {
+    Network network(LAMP_LOCAL, false, true);
+    TEST_ASSERT_FALSE(network.core.hasUnresolvedPowerCommand(network.lampId));
+    TEST_ASSERT_FALSE(network.core.hasUnresolvedPowerCommand(network.secondLampId));
+
+    network.submitTo(network.lampId, true, FIRST_COMMAND);
+    TEST_ASSERT_TRUE(network.core.hasUnresolvedPowerCommand(network.lampId));
+    TEST_ASSERT_FALSE(network.core.hasUnresolvedPowerCommand(network.secondLampId));
+    network.pump();
+    TEST_ASSERT_FALSE(network.core.hasUnresolvedPowerCommand(network.lampId));
+
+    Network uncertain(LAMP_LOCAL, false, true);
+    uncertain.dropAllCommands = true;
+    uncertain.submitTo(uncertain.lampId, true, FIRST_COMMAND);
+    for (uint8_t retry = 0; retry <= MAX_MESSAGE_RETRIES; ++retry) {
+        fakeNow += MESSAGE_TIMEOUT;
+        uncertain.core.poll();
+    }
+    TEST_ASSERT_TRUE(findDeviceById(uncertain.registry,
+        uncertain.lampId)->powerExecutionUnknown);
+    TEST_ASSERT_TRUE(uncertain.core.hasUnresolvedPowerCommand(uncertain.lampId));
+    TEST_ASSERT_FALSE(uncertain.core.hasUnresolvedPowerCommand(
+        uncertain.secondLampId));
+}
+
 void test_main_offline_lamp_returns_failure_without_receipt_or_execution() {
     Network network;
     findLamp(network.mainLamps, LAMP_LOCAL)->device.status = DeviceStatus::OFFLINE;
@@ -1292,6 +1317,58 @@ void test_core_and_v5_routes_are_learned_in_distinct_scopes_from_messages() {
     }
 }
 
+void test_lamp_topology_announcement_uses_core_route_without_local_id_collision() {
+    const uint32_t mainLocalId = 5678;
+    const uint32_t mainCoreId = makeCoreModuleId(CORE_LOGICAL_ID, mainLocalId);
+
+    ProvisioningPacket pairedLamp = {};
+    pairedLamp.type = ProvisioningPacketType::DEVICE_ANNOUNCE;
+    pairedLamp.role = DeviceRole::LAMP;
+    pairedLamp.pairingState = PairingState::PAIRED;
+    pairedLamp.deviceId = 11;
+    pairedLamp.parentMainId = mainLocalId;
+    strncpy(pairedLamp.hardwareId, "C6-0000000000000011",
+            sizeof(pairedLamp.hardwareId) - 1);
+    strncpy(pairedLamp.name, "lamp002", sizeof(pairedLamp.name) - 1);
+
+    Message announcement = {};
+    TEST_ASSERT_TRUE(makeCoreLampAnnouncementFromMain(
+        mainLocalId, pairedLamp, announcement));
+    TEST_ASSERT_EQUAL_UINT32(CORE_LOGICAL_ID, announcement.destinationId);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(CommunicationRouteScope::CORE),
+        static_cast<int>(ZigbeeRouteTable::destinationScope(announcement)));
+
+    CoreLinkPacket forwarded = {};
+    TEST_ASSERT_TRUE(coreAnnouncementFromZigbeeMessage(
+        announcement, mainCoreId, mainLocalId, forwarded));
+    TEST_ASSERT_EQUAL_UINT32(11, forwarded.localId);
+    TEST_ASSERT_EQUAL_UINT32(mainCoreId, forwarded.parentId);
+
+    Message assignment = {};
+    TEST_ASSERT_TRUE(makeCoreIdAssignedMessage(
+        mainLocalId, mainCoreId,
+        static_cast<uint8_t>(CoreModuleUpdateResult::REGISTERED), assignment));
+
+    Message localLampOne = {};
+    localLampOne.type = MessageType::DEVICE_ANNOUNCE;
+    localLampOne.sourceId = 1;
+    localLampOne.provisioningDeviceId = 1;
+    localLampOne.deviceRole = static_cast<uint8_t>(DeviceRole::LAMP);
+    localLampOne.pairingState = static_cast<uint8_t>(PairingState::PAIRED);
+
+    ZigbeeRouteTable routes;
+    routes.remember(assignment, CORE_PHYSICAL);
+    routes.remember(localLampOne, LAMP_PHYSICAL);
+    uint16_t address = 0;
+    TEST_ASSERT_TRUE(routes.find(announcement, address));
+    TEST_ASSERT_EQUAL_UINT16(CORE_PHYSICAL, address);
+
+    ZigbeeRouteTable withoutCoreRoute;
+    withoutCoreRoute.remember(localLampOne, LAMP_PHYSICAL);
+    TEST_ASSERT_FALSE(withoutCoreRoute.find(announcement, address));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_set_power_traverses_uart_main_lamp_and_execution_ack_returns);
@@ -1307,6 +1384,8 @@ int main(int, char**) {
     RUN_TEST(test_overlapping_same_lamp_commands_keep_history_stale_on_reordered_acks);
     RUN_TEST(test_two_lamps_route_power_and_correlate_retries_independently);
     RUN_TEST(test_core_refuses_offline_lamp_or_main_without_transmitting);
+    RUN_TEST(test_removal_guard_is_lamp_scoped_and_blocks_unknown_execution);
+    RUN_TEST(test_lamp_topology_announcement_uses_core_route_without_local_id_collision);
     RUN_TEST(test_main_offline_lamp_returns_failure_without_receipt_or_execution);
     RUN_TEST(test_lamp_offline_returns_failure_after_main_acceptance);
     RUN_TEST(test_unknown_destination_is_clean_local_error_and_main_disappearance_is_reported);

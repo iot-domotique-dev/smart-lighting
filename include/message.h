@@ -19,7 +19,11 @@ enum class MessageType {
     PAIR_REQUEST,
     PAIR_ACCEPT,
     PAIR_CONFIRM,
-    PAIR_REJECT
+    PAIR_REJECT,
+    UNPAIR_REQUEST,
+    UNPAIR_CONFIRM,
+    UNPAIR_COMMIT,
+    UNPAIR_REJECT
 };
 
 

@@ -12,13 +12,48 @@ void initializeMainProvisioningReservationState(
     state.highWaterDeviceId = MAX_LAMPS;
 }
 
+bool migrateMainProvisioningReservationStateV1(
+    const MainProvisioningReservationStateV1& legacy,
+    uint32_t expectedMainId,
+    MainProvisioningReservationState& migrated
+) {
+    if (legacy.version != 1 || legacy.reserved != 0 ||
+        legacy.mainId == 0 || legacy.mainId != expectedMainId ||
+        legacy.highWaterDeviceId < MAX_LAMPS || legacy.count > MAX_LAMPS) {
+        return false;
+    }
+    initializeMainProvisioningReservationState(expectedMainId, migrated);
+    migrated.count = legacy.count;
+    migrated.highWaterDeviceId = legacy.highWaterDeviceId;
+    for (uint8_t index = 0; index < legacy.count; ++index) {
+        migrated.identities[index] = legacy.identities[index];
+    }
+    return isValidMainProvisioningReservationState(migrated, expectedMainId);
+}
+
 bool isValidMainProvisioningReservationState(
     const MainProvisioningReservationState& state,
     uint32_t expectedMainId
 ) {
     if (state.version != MAIN_PROVISIONING_STATE_VERSION ||
         state.mainId == 0 || state.mainId != expectedMainId ||
-        state.highWaterDeviceId < MAX_LAMPS || state.count > MAX_LAMPS) {
+        state.highWaterDeviceId < MAX_LAMPS || state.count > MAX_LAMPS ||
+        (state.retiredLegacyIds & ~MAIN_LEGACY_ID_TOMBSTONE_MASK) != 0 ||
+        state.removalReserved != 0 ||
+        state.removalState > MAIN_REMOVAL_FAILED) {
+        return false;
+    }
+
+    if (state.removalState == MAIN_REMOVAL_NONE) {
+        if (state.removalOperationId != 0 || state.removalDeviceId != 0 ||
+            state.removalParentMainId != 0 || state.removalCoreDeviceId != 0 ||
+            state.removalHardwareId[0] != '\0') return false;
+    } else if (state.removalOperationId == 0 || state.removalDeviceId == 0 ||
+               state.removalParentMainId != expectedMainId ||
+               state.removalCoreDeviceId == 0 ||
+               state.removalHardwareId[0] == '\0' ||
+               memchr(state.removalHardwareId, '\0',
+                      sizeof(state.removalHardwareId)) == nullptr) {
         return false;
     }
 
@@ -77,8 +112,9 @@ void MemoryProvisioningReservationStore::setFailWrites(bool fail) {
 }
 
 MemoryProvisioningStore::MemoryProvisioningStore()
-    : hasRecord(false) {
+    : hasRecord(false), hasRemovalReceipt(false), failWrites(false) {
     memset(&record, 0, sizeof(record));
+    memset(&removalReceipt, 0, sizeof(removalReceipt));
 }
 
 bool MemoryProvisioningStore::load(ProvisioningRecord& output) const {
@@ -90,7 +126,7 @@ bool MemoryProvisioningStore::load(ProvisioningRecord& output) const {
 }
 
 bool MemoryProvisioningStore::save(const ProvisioningRecord& input) {
-    if (input.hardwareId[0] == '\0' || input.deviceId == 0 ||
+    if (failWrites || input.hardwareId[0] == '\0' || input.deviceId == 0 ||
         input.parentMainId == 0 || input.pairingState != PairingState::PAIRED) {
         return false;
     }
@@ -102,7 +138,47 @@ bool MemoryProvisioningStore::save(const ProvisioningRecord& input) {
 }
 
 bool MemoryProvisioningStore::clear() {
+    if (failWrites) return false;
     memset(&record, 0, sizeof(record));
     hasRecord = false;
     return true;
+}
+
+bool MemoryProvisioningStore::loadRemovalReceipt(
+    LampRemovalReceipt& output
+) const {
+    output = {};
+    if (!hasRemovalReceipt) return false;
+    output = removalReceipt;
+    return output.version == LAMP_REMOVAL_RECEIPT_VERSION &&
+           output.operationId != 0 && output.deviceId != 0 &&
+           output.parentMainId != 0 && output.hardwareId[0] != '\0' &&
+           memchr(output.hardwareId, '\0', sizeof(output.hardwareId)) != nullptr &&
+           (output.stage == LampRemovalReceiptStage::PREPARED ||
+            output.stage == LampRemovalReceiptStage::CLEARED);
+}
+
+bool MemoryProvisioningStore::saveRemovalReceipt(
+    const LampRemovalReceipt& input
+) {
+    if (failWrites || input.version != LAMP_REMOVAL_RECEIPT_VERSION ||
+        input.operationId == 0 || input.deviceId == 0 ||
+        input.parentMainId == 0 || input.hardwareId[0] == '\0' ||
+        memchr(input.hardwareId, '\0', sizeof(input.hardwareId)) == nullptr ||
+        (input.stage != LampRemovalReceiptStage::PREPARED &&
+         input.stage != LampRemovalReceiptStage::CLEARED)) return false;
+    removalReceipt = input;
+    hasRemovalReceipt = true;
+    return true;
+}
+
+bool MemoryProvisioningStore::clearRemovalReceipt() {
+    if (failWrites) return false;
+    removalReceipt = {};
+    hasRemovalReceipt = false;
+    return true;
+}
+
+void MemoryProvisioningStore::setFailWrites(bool fail) {
+    failWrites = fail;
 }

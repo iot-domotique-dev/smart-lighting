@@ -4,11 +4,13 @@
 
 #include "core_link_codec.h"
 #include "message.h"
+#include "provisioning.h"
 
 /* V7 topology messages reuse existing wire fields and STATE message type. */
 constexpr int32_t CORE_TOPOLOGY_MAIN_ANNOUNCEMENT = 0x43520001;
 constexpr int32_t CORE_TOPOLOGY_ID_ASSIGNED = 0x43520002;
 constexpr int32_t CORE_TOPOLOGY_ID_ACK = 0x43520003;
+constexpr int32_t CORE_TOPOLOGY_LAMP_ANNOUNCEMENT = 0x43520004;
 
 bool makeCoreMainAnnouncement(
     uint32_t localId,
@@ -23,6 +25,10 @@ bool coreAnnouncementFromZigbeeMessage(
     uint32_t mainLocalId,
     CoreLinkPacket& packet
 );
+
+bool makeCoreLampAnnouncementFromMain(uint32_t mainLocalId,
+                                      const ProvisioningPacket& lamp,
+                                      Message& message);
 
 bool makeCoreIdAssignedMessage(
     uint32_t localId,

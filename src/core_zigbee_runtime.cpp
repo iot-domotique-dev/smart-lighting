@@ -138,6 +138,30 @@ bool CoreZigbeeRuntime::dispatchZigbeeMessage(const Message& message) {
         return true;
     }
 
+    uint32_t removalOperationId = 0;
+    CorePairingResultCode removalResult = CorePairingResultCode::NONE;
+    uint32_t removalLampLocalId = 0;
+    char removalHardwareId[sizeof(message.hardwareId)] = {};
+    if (readCoreRemovalResultMessage(message, mainLocalId, mainCoreId,
+            removalOperationId, removalResult, removalLampLocalId,
+            removalHardwareId, sizeof(removalHardwareId))) {
+        CoreLinkPacket result = {};
+        result.type = CoreLinkMessageType::PAIRING;
+        result.sequence = static_cast<uint16_t>(removalOperationId);
+        result.pairingAction = CoreLinkPairingAction::REMOVAL_RESULT;
+        result.localId = mainLocalId;
+        result.parentId = mainCoreId;
+        result.operationId = removalOperationId;
+        result.pairingResult = removalResult;
+        result.deviceId = removalLampLocalId;
+        result.coreId = removalLampLocalId == 0
+            ? 0 : makeCoreModuleId(mainCoreId, removalLampLocalId);
+        strncpy(result.hardwareId, removalHardwareId,
+                sizeof(result.hardwareId) - 1);
+        (void)uart.send(result);
+        return true;
+    }
+
     CoreLinkPacket announcement = {};
     if (!coreAnnouncementFromZigbeeMessage(message, mainCoreId, mainLocalId,
                                            announcement)) {
@@ -169,6 +193,17 @@ void CoreZigbeeRuntime::handleUartPacket(const CoreLinkPacket& packet) {
             valid = makeCorePairingOperationCommand(packet.localId,
                 packet.sessionId, packet.operationId, packet.hardwareId,
                 packet.pairingName, request);
+        } else if (packet.pairingAction == CoreLinkPairingAction::REMOVE_DEVICE) {
+            valid = packet.parentId == mainCoreId && packet.deviceId != 0 &&
+                packet.coreId == makeCoreModuleId(mainCoreId, packet.deviceId) &&
+                makeCoreRemovalControlMessage(packet.localId, mainCoreId,
+                    CoreRemovalCommand::REMOVE, packet.operationId,
+                    packet.deviceId, packet.coreId, request);
+        } else if (packet.pairingAction == CoreLinkPairingAction::QUERY_REMOVAL) {
+            valid = packet.parentId == mainCoreId &&
+                makeCoreRemovalControlMessage(packet.localId, mainCoreId,
+                    CoreRemovalCommand::QUERY, packet.operationId, 0, 0,
+                    request);
         }
         if (!valid) return;
         request.timestamp = millis();
@@ -177,7 +212,15 @@ void CoreZigbeeRuntime::handleUartPacket(const CoreLinkPacket& packet) {
         CoreLinkPacket failure = {};
         failure.type = CoreLinkMessageType::PAIRING;
         failure.localId = mainLocalId;
-        if (packet.pairingAction == CoreLinkPairingAction::PAIR_CANDIDATE) {
+        if (packet.pairingAction == CoreLinkPairingAction::REMOVE_DEVICE ||
+            packet.pairingAction == CoreLinkPairingAction::QUERY_REMOVAL) {
+            failure.pairingAction = CoreLinkPairingAction::REMOVAL_RESULT;
+            failure.operationId = packet.operationId;
+            failure.parentId = packet.parentId;
+            failure.deviceId = packet.deviceId;
+            failure.coreId = packet.coreId;
+            failure.pairingResult = CorePairingResultCode::UNCERTAIN;
+        } else if (packet.pairingAction == CoreLinkPairingAction::PAIR_CANDIDATE) {
             failure.pairingAction = CoreLinkPairingAction::OPERATION_RESULT;
             failure.sessionId = packet.sessionId;
             failure.operationId = packet.operationId;

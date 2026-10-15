@@ -71,7 +71,7 @@ bool readText(
 }
 
 bool isValidType(uint8_t value) {
-    return value <= static_cast<uint8_t>(MessageType::PAIR_REJECT);
+    return value <= static_cast<uint8_t>(MessageType::UNPAIR_REJECT);
 }
 
 bool isValidStatus(uint8_t value) {

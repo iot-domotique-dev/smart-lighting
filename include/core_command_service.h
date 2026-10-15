@@ -13,6 +13,7 @@ public:
     CoreCommandError submitPower(uint32_t destinationId, bool power,
                                 uint32_t& messageId, uint32_t requestedId = 0);
     bool handleReply(const Message& message);
+    bool hasUnresolvedPowerCommand(uint32_t destinationId) const;
     void poll();
 };
 

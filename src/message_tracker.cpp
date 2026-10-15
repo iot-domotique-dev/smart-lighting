@@ -32,7 +32,7 @@ bool validCoreAck(const Message& command, const Message& ack) {
                     ack.sourceId == command.sourceId) &&
                    (ack.value == static_cast<int32_t>(ExecutionStatus::FAILED) ||
                     (ack.value >= static_cast<int32_t>(CoreCommandError::UNKNOWN_DESTINATION) &&
-                     ack.value <= static_cast<int32_t>(CoreCommandError::DUPLICATE_ID)));
+                     ack.value <= static_cast<int32_t>(CoreCommandError::REMOVAL_IN_PROGRESS)));
     }
     return false;
 }

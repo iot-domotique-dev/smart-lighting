@@ -407,6 +407,14 @@ bool hasZigbeeRouteForHardwareId(const char* hardwareId) {
     return findRoute(request, 0, CommunicationRouteScope::LOCAL_DEVICE, address);
 }
 
+bool forgetZigbeeRoute(uint32_t logicalId, const char* hardwareId,
+                       CommunicationRouteScope scope) {
+    portENTER_CRITICAL(&peerRoutesMux);
+    const bool removed = peerRoutes.forget(logicalId, hardwareId, scope);
+    portEXIT_CRITICAL(&peerRoutesMux);
+    return removed;
+}
+
 #else
 
 ZigbeeTransport::ZigbeeTransport()
@@ -448,5 +456,6 @@ const char* ZigbeeTransport::name() const {
 bool openZigbeeJoinWindow(uint8_t) { return false; }
 bool closeZigbeeJoinWindow() { return false; }
 bool hasZigbeeRouteForHardwareId(const char*) { return false; }
+bool forgetZigbeeRoute(uint32_t, const char*, CommunicationRouteScope) { return false; }
 
 #endif

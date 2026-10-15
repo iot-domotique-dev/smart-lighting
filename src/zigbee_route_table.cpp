@@ -15,7 +15,8 @@ bool isCoreSender(const Message& message) {
           message.commandType == CORE_TOPOLOGY_ID_ASSIGNED &&
           message.deviceRole == static_cast<uint8_t>(DeviceRole::CORE)) ||
         (message.type == MessageType::STATE &&
-         message.commandType == CORE_PAIRING_CONTROL_MESSAGE));
+         (message.commandType == CORE_PAIRING_CONTROL_MESSAGE ||
+          message.commandType == CORE_REMOVAL_CONTROL_MESSAGE)));
 }
 
 bool isCoreDestination(const Message& message) {
@@ -25,16 +26,35 @@ bool isCoreDestination(const Message& message) {
          message.deviceRole == static_cast<uint8_t>(DeviceRole::MAIN) &&
          message.destinationId == CORE_LOGICAL_ID) ||
         (message.type == MessageType::STATE &&
+         message.commandType == CORE_TOPOLOGY_LAMP_ANNOUNCEMENT &&
+         message.destinationId == CORE_LOGICAL_ID) ||
+        (message.type == MessageType::STATE &&
          message.destinationId == CORE_LOGICAL_ID &&
          (message.commandType == CORE_PAIRING_CANDIDATE_MESSAGE ||
           message.commandType == CORE_PAIRING_SESSION_RESULT_MESSAGE ||
           message.commandType == CORE_PAIRING_OPERATION_RESULT_MESSAGE ||
-          message.commandType == CORE_PAIRING_CANDIDATE_LIMIT_MESSAGE));
+          message.commandType == CORE_PAIRING_CANDIDATE_LIMIT_MESSAGE ||
+          message.commandType == CORE_REMOVAL_RESULT_MESSAGE));
 }
 }
 
 void ZigbeeRouteTable::clear() {
     memset(routes, 0, sizeof(routes));
+}
+
+bool ZigbeeRouteTable::forget(uint32_t logicalId, const char* hardwareId,
+                              CommunicationRouteScope scope) {
+    if (logicalId == 0 || hardwareId == nullptr || hardwareId[0] == '\0')
+        return false;
+    for (uint8_t index = 0; index < ZIGBEE_ROUTE_TABLE_CAPACITY; ++index) {
+        Route& route = routes[index];
+        if (route.used && route.scope == scope && route.logicalId == logicalId &&
+            strncmp(route.hardwareId, hardwareId, sizeof(route.hardwareId)) == 0) {
+            memset(&route, 0, sizeof(route));
+            return true;
+        }
+    }
+    return false;
 }
 
 void ZigbeeRouteTable::remember(const Message& message, uint16_t physicalSender) {

@@ -8,6 +8,9 @@ public:
     bool load(ProvisioningRecord& record) const override;
     bool save(const ProvisioningRecord& record) override;
     bool clear() override;
+    bool loadRemovalReceipt(LampRemovalReceipt& receipt) const override;
+    bool saveRemovalReceipt(const LampRemovalReceipt& receipt) override;
+    bool clearRemovalReceipt() override;
 };
 
 /* Separate additive NVS namespace used only by MAIN ID allocation. */

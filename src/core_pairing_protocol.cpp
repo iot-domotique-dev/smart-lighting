@@ -247,3 +247,107 @@ bool readCorePairingCandidateLimitMessage(const Message& message,
     sessionId = message.id;
     return true;
 }
+
+bool makeCoreRemovalControlMessage(uint32_t mainLocalId,
+                                   uint32_t mainCoreId,
+                                   CoreRemovalCommand command,
+                                   uint32_t operationId,
+                                   uint32_t lampLocalId,
+                                   uint32_t lampCoreId,
+                                   Message& message) {
+    if (mainLocalId == 0 || mainCoreId == 0 || operationId == 0 ||
+        (command != CoreRemovalCommand::REMOVE &&
+         command != CoreRemovalCommand::QUERY) ||
+        (command == CoreRemovalCommand::REMOVE &&
+         (lampLocalId == 0 || lampCoreId == 0)) ||
+        (command == CoreRemovalCommand::QUERY &&
+         (lampLocalId != 0 || lampCoreId != 0))) return false;
+    message = {};
+    message.id = operationId;
+    message.sourceId = CORE_LOGICAL_ID;
+    message.destinationId = mainLocalId;
+    message.type = MessageType::STATE;
+    message.commandType = CORE_REMOVAL_CONTROL_MESSAGE;
+    message.parentMainId = mainCoreId;
+    message.provisioningDeviceId = lampLocalId;
+    message.value = static_cast<int32_t>(lampCoreId);
+    message.value2 = static_cast<int32_t>(command);
+    return true;
+}
+
+bool readCoreRemovalControlMessage(const Message& message,
+                                   uint32_t expectedMainLocalId,
+                                   uint32_t expectedMainCoreId,
+                                   CoreRemovalCommand& command,
+                                   uint32_t& operationId,
+                                   uint32_t& lampLocalId,
+                                   uint32_t& lampCoreId) {
+    if (expectedMainLocalId == 0 || expectedMainCoreId == 0 ||
+        message.type != MessageType::STATE ||
+        message.commandType != CORE_REMOVAL_CONTROL_MESSAGE ||
+        message.sourceId != CORE_LOGICAL_ID ||
+        message.destinationId != expectedMainLocalId || message.id == 0 ||
+        message.parentMainId != expectedMainCoreId ||
+        (message.value2 != static_cast<int32_t>(CoreRemovalCommand::REMOVE) &&
+         message.value2 != static_cast<int32_t>(CoreRemovalCommand::QUERY)))
+        return false;
+    command = static_cast<CoreRemovalCommand>(message.value2);
+    operationId = message.id;
+    lampLocalId = message.provisioningDeviceId;
+    lampCoreId = static_cast<uint32_t>(message.value);
+    if (command == CoreRemovalCommand::REMOVE)
+        return lampLocalId != 0 && lampCoreId != 0;
+    return lampLocalId == 0 && lampCoreId == 0;
+}
+
+bool makeCoreRemovalResultMessage(uint32_t mainLocalId,
+                                  uint32_t mainCoreId,
+                                  uint32_t operationId,
+                                  CorePairingResultCode result,
+                                  uint32_t lampLocalId,
+                                  const char* hardwareId,
+                                  Message& message) {
+    if (mainLocalId == 0 || mainCoreId == 0 || operationId == 0 ||
+        result == CorePairingResultCode::NONE ||
+        result > CorePairingResultCode::ROUTE_UNAVAILABLE ||
+        (result != CorePairingResultCode::NOT_FOUND &&
+         (lampLocalId == 0 || hardwareId == nullptr ||
+          !boundedText(hardwareId, sizeof(message.hardwareId))))) return false;
+    initializeMainToCore(mainLocalId, message, CORE_REMOVAL_RESULT_MESSAGE,
+                         operationId);
+    message.parentMainId = mainCoreId;
+    message.value = static_cast<int32_t>(result);
+    message.value2 = static_cast<int32_t>(lampLocalId);
+    return hardwareId == nullptr || hardwareId[0] == '\0' ||
+           copyText(message.hardwareId, sizeof(message.hardwareId), hardwareId);
+}
+
+bool readCoreRemovalResultMessage(const Message& message,
+                                  uint32_t expectedMainLocalId,
+                                  uint32_t expectedMainCoreId,
+                                  uint32_t& operationId,
+                                  CorePairingResultCode& result,
+                                  uint32_t& lampLocalId,
+                                  char* hardwareId,
+                                  size_t hardwareCapacity) {
+    if (expectedMainLocalId == 0 || expectedMainCoreId == 0 ||
+        message.type != MessageType::STATE ||
+        message.commandType != CORE_REMOVAL_RESULT_MESSAGE ||
+        message.sourceId != expectedMainLocalId ||
+        message.destinationId != CORE_LOGICAL_ID || message.id == 0 ||
+        message.parentMainId != expectedMainCoreId ||
+        !isResultCode(static_cast<uint32_t>(message.value)) || hardwareId == nullptr)
+        return false;
+    operationId = message.id;
+    result = static_cast<CorePairingResultCode>(message.value);
+    if (result == CorePairingResultCode::NOT_FOUND) {
+        lampLocalId = 0;
+        hardwareId[0] = '\0';
+        return message.value2 == 0 && message.hardwareId[0] == '\0';
+    }
+    if (message.value2 <= 0 ||
+        !boundedText(message.hardwareId, sizeof(message.hardwareId)) ||
+        hardwareCapacity < strlen(message.hardwareId) + 1) return false;
+    lampLocalId = static_cast<uint32_t>(message.value2);
+    return copyText(hardwareId, hardwareCapacity, message.hardwareId);
+}

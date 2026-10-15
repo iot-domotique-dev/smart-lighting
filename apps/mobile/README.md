@@ -1,8 +1,8 @@
-# Smart Lighting Mobile — V7.6.4
+# Smart Lighting Mobile — V7.7.3
 
-Application Expo SDK 57 / React Native / TypeScript pour consulter CORE-WIFI, piloter les lampes individuellement en ON/OFF et les ajouter depuis Android/iOS à l’aide de l’API de pairing V7.6.3 existante.
+Application Expo SDK 57 / React Native / TypeScript pour consulter CORE-WIFI, piloter les lampes individuellement en ON/OFF, les ajouter et les retirer depuis Android/iOS avec les API V7 existantes.
 
-Le bilan V7.6.4, y compris le résultat matériel rapporté pour l’ajout d’une lampe depuis le téléphone, est dans le [dossier V7.6](../../docs/V7_6_PAIRING.md). Le dossier [V7.5](../../docs/V7_5_MOBILE_APP.md) décrit la consultation et les commandes ON/OFF.
+Le parcours d’ajout V7.6.4 et son résultat matériel rapporté sont dans le [dossier V7.6](../../docs/V7_6_PAIRING.md). Le protocole de retrait du firmware V7.7.2 et son état de validation sont dans le [dossier V7.7](../../docs/V7_7_UNPAIRING.md). Le dossier [V7.5](../../docs/V7_5_MOBILE_APP.md) décrit la consultation et les commandes ON/OFF.
 
 ## Préparer et démarrer
 
@@ -55,6 +55,37 @@ Une commande en cours désactive les deux boutons de cette lampe; une autre lamp
 
 `executed` confirme l’exécution logicielle par ACK, pas un état électrique mesuré. `expired`, `command_not_found`, une réponse POST perdue et un délai de suivi sont présentés comme incertains; l’application relit l’état connu, sans prétendre prouver quelle commande l’a produit.
 
+## Retirer une lampe — V7.7.3
+
+Dans le détail d’une lampe en ligne, **Retirer cette lampe** ouvre une confirmation destructive avec son nom et son ID V7. Le texte précise que l’action retire l’association de Smart Lighting et n’éteint pas la sortie électrique. **Annuler** ne lance aucune requête. Le retrait est désactivé si la lampe ou son MAIN est hors ligne, si l’inventaire n’est plus frais, si une commande SET_POWER a un résultat en cours ou incertain, si un retrait est déjà actif ou si son état local ne peut pas être sauvegardé.
+
+Le parcours utilise uniquement les routes firmware V7.7.2 existantes :
+
+- `POST /api/v1/devices/{id}/removal-operations` avec `{"operation_id": <uint32 non nul>}`;
+- `GET /api/v1/removal-operations/{operation_id}` pour le suivi.
+
+Le client génère l’identifiant avec `expo-crypto`, enregistre d’abord l’opération dans `expo-secure-store`, puis envoie un seul POST. Le Bearer token n’est pas copié dans cet enregistrement. HTTP `202` et `processing` signifient que le CORE suit l’opération, pas que la lampe a déjà disparu. L’application interroge le même identifiant par GET. Une perte de réponse HTTP, une interruption de l’application ou un redémarrage du téléphone reprennent ce suivi; aucun second POST n’est envoyé automatiquement.
+
+Les états `processing`, `succeeded`, `failed`, `uncertain` et `not_found` restent distincts. Après `succeeded`, l’application relit `/api/v1/devices` et ne retourne à la liste qu’après avoir vérifié que la lampe a disparu. Si elle est toujours listée, l’écran propose seulement d’actualiser l’inventaire. `not_found` n’établit pas que le POST n’a jamais été reçu : l’opération reste à vérifier et ne peut pas être renvoyée depuis cette reprise. Une erreur réseau/serveur de suivi peut être retentée en GET seulement.
+
+Le blocage est global pour un second retrait et cible les commandes ON/OFF de la lampe qui est en cours de retrait. L’ajout/pairing reste une action séparée; l’application ne le démarre pas automatiquement après le retrait. La confirmation de retrait ne mesure pas l’état électrique et n’envoie pas une commande power OFF.
+
+### Vérification Android V7.7.3
+
+Avec CORE-WIFI V7.7.2 accessible sur le réseau local, un MAIN et une lampe appairée :
+
+1. Ouvrir le détail de la lampe, toucher **Retirer cette lampe**, vérifier le nom, l’ID et le texte sur la sortie électrique, puis toucher **Annuler**. Vérifier que la lampe est toujours dans la liste.
+2. Recommencer et toucher **Confirmer le retrait**. Vérifier que l’opération atteint `succeeded`, puis que la lampe disparaît de la liste après la relecture de l’inventaire.
+3. Vérifier dans le moniteur MAIN/LAMP les messages de retrait normaux et contrôler que la lampe retirée n’est plus commandable depuis l’application.
+4. Refaire un pairing depuis **Ajouter une lampe** si l’on veut vérifier le cycle complet; il s’agit d’une action distincte.
+5. Pour une vérification de reprise, interrompre l’application après le POST, la relancer, puis vérifier qu’elle reprend le même `operation_id` en GET. Ne pas provoquer cette interruption sur une installation à préserver sans pouvoir récupérer l’ID/la configuration.
+
+Les tests simulés et l’export Android ne remplacent pas l’essai sur téléphone et cartes. Le compte rendu matériel du 15 octobre 2026 est consigné ci-dessous; les cas de panne et de concurrence restent à tester.
+
+### Résultat matériel rapporté — 15 octobre 2026
+
+L’utilisateur confirme sur Android et matériel réel la découverte, l’ajout avec nom, l’appairage, ON/OFF, le retrait depuis l’application, le réappairage avec un nouvel ID V7 et la persistance après redémarrage. La validation utilise un MAIN et une LAMP. Aucun ID d’opération ou journal série complet n’a été communiqué. Les scénarios de plusieurs lampes actives, de concurrence et d’interruption d’une transaction restent hors de cette validation nominale.
+
 ## Ajouter une lampe — V7.6.4
 
 Depuis **Mes lampes**, toucher **Ajouter une lampe** ouvre l’écran de pairing. L’écran vérifie `/health`, lit la session existante et reprend une session active sans en ouvrir une autre. Consulter l’écran ne démarre pas la radio : toucher **Démarrer la recherche** est nécessaire pour envoyer le POST d’ouverture de 60 secondes.
@@ -84,11 +115,11 @@ Utiliser un CORE-WIFI avec le firmware V7.6.3, un MAIN et au moins une LAMP_C6 n
 4. Vérifier que l’opération atteint `succeeded` et qu’un ID local est affiché. La lampe doit ensuite apparaître dans **Mes lampes**; si l’inventaire tarde, attendre le message de synchronisation puis actualiser.
 5. Toucher **Terminer** et attendre la confirmation de fermeture de session avant de quitter l’écran.
 
-Les scénarios de découverte nécessitent une lampe réellement non appairée. Une candidate ne figure pas dans l’inventaire opérationnel avant le succès final. Les limites firmware restent 10 lampes, 10 candidates simultanées et 10 routes Zigbee au total. L’API ne donne pas de suppression/désappairage et le contrat `/devices` ne fournit pas l’identité matérielle d’une lampe déjà connue; l’écran ne peut donc que s’appuyer sur la liste des candidates filtrée par le MAIN.
+Les scénarios de découverte nécessitent une lampe réellement non appairée. Une candidate ne figure pas dans l’inventaire opérationnel avant le succès final. Les limites firmware restent 10 lampes, 10 candidates simultanées et 10 routes Zigbee au total. Au jalon V7.6.4, le retrait applicatif n’était pas encore disponible; il est ajouté en V7.7.3 dans le [dossier de retrait](../../docs/V7_7_UNPAIRING.md). Le contrat `/devices` ne fournit pas l’identité matérielle d’une lampe déjà connue, et l’écran d’ajout s’appuie donc sur la liste des candidates filtrée par le MAIN.
 
 ### Résultat matériel rapporté — 13 octobre 2026
 
-L’utilisateur a confirmé la réussite de l’ajout d’une lampe depuis l’application sur son téléphone, avec un seul MAIN et une LAMP_C6. Le compte rendu ne précise pas l’OS du téléphone et ne contient ni ID d’opération, ni ID local, ni capture ou journal série. Cette validation couvre le parcours nominal d’ajout sur ce montage; elle ne valide pas la suppression depuis l’application, le multi-MAIN ou plusieurs lampes physiques.
+L’utilisateur a confirmé la réussite de l’ajout d’une lampe depuis l’application sur son téléphone, avec un seul MAIN et une LAMP_C6. Le compte rendu ne précise pas l’OS du téléphone et ne contient ni ID d’opération, ni ID local, ni capture ou journal série. Cette validation couvre le parcours nominal d’ajout sur ce montage; elle ne valide pas le nouveau parcours de retrait V7.7.3, le multi-MAIN ou plusieurs lampes physiques.
 
 ## Structure
 
@@ -96,10 +127,10 @@ L’utilisateur a confirmé la réussite de l’ajout d’une lampe depuis l’a
 - `src/api/` : types et client HTTP de lecture, commande et suivi.
 - `src/settings/` et `src/security/` : adresse et jeton conservés via SecureStore.
 - `src/features/core/` : configuration et test du CORE.
-- `src/features/lighting/` : liste, détail, commandes d’éclairage et suivi progressif.
+- `src/features/lighting/` : liste, détail, commandes d’éclairage, retrait et suivis réconciliables.
 - `src/features/pairing/` : parcours d’ajout, suivi prudent des sessions et opérations.
 - `src/components/` : indicateur visuel partagé.
-- `test/` : tests du client API et du workflow pairing avec réponses simulées.
+- `test/` : tests du client API, du workflow pairing et du workflow de retrait avec réponses simulées.
 
 ## Vérifications locales
 
@@ -116,4 +147,6 @@ Pour V7.5.2, le typage, le lint, les 15/15 tests simulés, la vérification des 
 
 La migration SDK 57 réduit les avis rapportés par npm, mais `npm audit fix --force` n’est pas appliqué automatiquement : ses propositions peuvent changer les versions majeures. La mise à niveau vers un SDK ultérieur fera l’objet d’une validation séparée.
 
-Pour V7.6.4, `npm run typecheck`, `npm run lint`, les **34/34 tests simulés**, `npx expo install --check` et `npx expo export --platform android` ont réussi après alignement des patchs `expo` et `expo-dev-client` sur SDK 57. L’environnement de vérification utilisait Node 20.19 et npm a signalé `EBADENGINE`; le projet et Expo SDK 57 demandent Node 22.13 ou plus récent. Le parcours nominal d’ajout a depuis été confirmé sur le téléphone de l’utilisateur; refaire les vérifications logicielles sous Node 22.13+ reste souhaitable pour éliminer cet avertissement d’environnement. L’export Android seul ne constitue pas une validation matérielle.
+Pour V7.6.4, `npm run typecheck`, `npm run lint`, les **34/34 tests simulés**, `npx expo install --check` et `npx expo export --platform android` ont réussi après alignement des patchs `expo` et `expo-dev-client` sur SDK 57. L’environnement de vérification utilisait Node 20.19 et npm a signalé `EBADENGINE`; le projet et Expo SDK 57 demandent Node 22.13 ou plus récent.
+
+Pour V7.7.3, `npm run lint`, `npm run typecheck`, les **56/56 tests simulés** et `npx expo export --platform android` réussissent. `npx expo install --check` signale que la dépendance `expo@57.0.28` est un patch en dessous de `~57.0.29`; elle n’a pas été mise à jour dans cette étape. Node 20.19.4 a été utilisé alors que le projet demande Node 22.13 ou plus récent. L’export Android vérifie le bundling JavaScript, pas l’installation native, le comportement sur téléphone ou le firmware.

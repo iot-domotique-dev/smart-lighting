@@ -144,6 +144,24 @@ export interface PairingOperationResponse {
   };
 }
 
+export type RemovalOperationState = 'processing' | 'succeeded' | 'failed' |
+  'uncertain' | 'not_found';
+
+export interface RemovalOperation {
+  id: V7Id;
+  device_id: V7Id;
+  state: RemovalOperationState;
+  result_code?: string;
+}
+
+export interface RemovalOperationResponse {
+  operation: RemovalOperation & { result_code: string };
+}
+
+export interface RemovalOperationSubmissionResponse {
+  operation: RemovalOperation;
+}
+
 export interface ApiErrorResponse {
   error: { code: string; message: string };
 }

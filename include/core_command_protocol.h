@@ -13,7 +13,8 @@ enum class CoreCommandError : int32_t {
     TRANSPORT_FAILURE = 14,
     DEDUP_FULL = 15,
     TRACKER_FULL = 16,
-    DUPLICATE_ID = 17
+    DUPLICATE_ID = 17,
+    REMOVAL_IN_PROGRESS = 18
 };
 
 bool isCoreCommandMessage(const Message& message);

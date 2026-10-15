@@ -33,3 +33,6 @@ public:
 bool openZigbeeJoinWindow(uint8_t durationSeconds);
 bool closeZigbeeJoinWindow();
 bool hasZigbeeRouteForHardwareId(const char* hardwareId);
+bool forgetZigbeeRoute(uint32_t logicalId, const char* hardwareId,
+                       CommunicationRouteScope scope =
+                           CommunicationRouteScope::LOCAL_DEVICE);

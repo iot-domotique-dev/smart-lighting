@@ -23,6 +23,26 @@ bool sendMessage(Communication&, Message) {
 void setUp() {}
 void tearDown() {}
 
+static void assertProvisioningWireEnvelope(
+    const ProvisioningPacket& packet, uint32_t sourceId, uint32_t destinationId
+) {
+    Message applicationMessage = {};
+    TEST_ASSERT_TRUE(encodeProvisioningPacket(packet, 101, sourceId,
+        destinationId, applicationMessage));
+    uint8_t bytes[ZIGBEE_MESSAGE_MAX_ENCODED_SIZE] = {};
+    size_t length = 0;
+    TEST_ASSERT_TRUE(encodeZigbeeMessage(applicationMessage, bytes,
+        sizeof(bytes), length));
+    Message receivedMessage = {};
+    TEST_ASSERT_TRUE(decodeZigbeeMessage(bytes, length, receivedMessage));
+    ProvisioningPacket decoded = {};
+    TEST_ASSERT_TRUE(decodeProvisioningPacket(receivedMessage, decoded));
+    TEST_ASSERT_EQUAL_UINT32(sourceId, decoded.sourceId);
+    TEST_ASSERT_EQUAL_UINT32(destinationId, decoded.destinationId);
+    TEST_ASSERT_EQUAL_UINT32(packet.transactionId, decoded.transactionId);
+    TEST_ASSERT_EQUAL_UINT32(packet.deviceId, decoded.deviceId);
+}
+
 void test_command_round_trip_uses_stable_wire_format() {
     Message input = {};
     input.id = 0x12345678;
@@ -137,6 +157,47 @@ void test_v4_pairing_packet_mapping_survives_zigbee_wire_codec() {
     TEST_ASSERT_EQUAL_STRING(packet.name, receivedPacket.name);
 }
 
+void test_unpair_packets_bind_transaction_to_real_zigbee_endpoints() {
+    ProvisioningPacket request = {};
+    request.type = ProvisioningPacketType::UNPAIR_REQUEST;
+    request.role = DeviceRole::MAIN;
+    request.pairingState = PairingState::UNPAIRING;
+    request.deviceId = 11;
+    request.parentMainId = 88;
+    request.transactionId = 0xAABBCCDD;
+    strcpy(request.hardwareId, "C6-0011223344556677");
+    assertProvisioningWireEnvelope(request, 88, 11);
+
+    Message encoded = {};
+    TEST_ASSERT_TRUE(encodeProvisioningPacket(request, 101, 88, 11, encoded));
+    encoded.sourceId = 89;
+    ProvisioningPacket decoded = {};
+    TEST_ASSERT_FALSE(decodeProvisioningPacket(encoded, decoded));
+    encoded.sourceId = 88;
+    encoded.destinationId = 12;
+    TEST_ASSERT_FALSE(decodeProvisioningPacket(encoded, decoded));
+
+    ProvisioningPacket confirmation = request;
+    confirmation.type = ProvisioningPacketType::UNPAIR_CONFIRM;
+    confirmation.role = DeviceRole::LAMP;
+    assertProvisioningWireEnvelope(confirmation, 11, 88);
+
+    ProvisioningPacket rejection = confirmation;
+    rejection.type = ProvisioningPacketType::UNPAIR_REJECT;
+    rejection.pairingState = PairingState::PAIRED;
+    assertProvisioningWireEnvelope(rejection, 11, 88);
+
+    ProvisioningPacket commit = request;
+    commit.type = ProvisioningPacketType::UNPAIR_COMMIT;
+    commit.pairingState = PairingState::UNPAIRED;
+    assertProvisioningWireEnvelope(commit, 88, 11);
+
+    ProvisioningPacket announcement = confirmation;
+    announcement.type = ProvisioningPacketType::DEVICE_ANNOUNCE;
+    announcement.pairingState = PairingState::UNPAIRING;
+    assertProvisioningWireEnvelope(announcement, 11, 0);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_command_round_trip_uses_stable_wire_format);
@@ -144,5 +205,6 @@ int main(int, char**) {
     RUN_TEST(test_decoder_rejects_truncated_and_unknown_version_frames);
     RUN_TEST(test_encoder_rejects_insufficient_buffer_and_invalid_type);
     RUN_TEST(test_v4_pairing_packet_mapping_survives_zigbee_wire_codec);
+    RUN_TEST(test_unpair_packets_bind_transaction_to_real_zigbee_endpoints);
     return UNITY_END();
 }

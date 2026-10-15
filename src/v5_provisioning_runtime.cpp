@@ -6,6 +6,8 @@
 #include "action.h"
 #include "device_manager.h"
 #include "device_hardware_id.h"
+#include "core_module_service.h"
+#include "core_topology_protocol.h"
 #include "message_id_generator.h"
 #include "message_router.h"
 #include "v5_provisioning_runtime.h"
@@ -40,7 +42,11 @@ bool isProvisioningMessage(MessageType type) {
            type == MessageType::PAIR_REQUEST ||
            type == MessageType::PAIR_ACCEPT ||
            type == MessageType::PAIR_CONFIRM ||
-           type == MessageType::PAIR_REJECT;
+           type == MessageType::PAIR_REJECT ||
+           type == MessageType::UNPAIR_REQUEST ||
+           type == MessageType::UNPAIR_CONFIRM ||
+           type == MessageType::UNPAIR_COMMIT ||
+           type == MessageType::UNPAIR_REJECT;
 }
 }  // namespace
 
@@ -70,6 +76,8 @@ V5ProvisioningRuntime::V5ProvisioningRuntime(
       pairingOperationStartedAt(0) {
     hardwareId[0] = '\0';
     activePairingHardwareId[0] = '\0';
+    nextRemovalRetryAt = 0;
+    lastRemovalContactAt = 0;
 }
 
 bool V5ProvisioningRuntime::begin(
@@ -150,6 +158,14 @@ void V5ProvisioningRuntime::poll() {
                 sendPairingSessionResult(expiredSession, CorePairingResultCode::UNCERTAIN);
             }
         }
+        if (mainPairing->hasActiveRemoval() &&
+            static_cast<int32_t>(now - nextRemovalRetryAt) >= 0) {
+            ProvisioningPacket request = {};
+            if (mainPairing->buildRemovalPacket(request)) {
+                (void)sendPacket(request, mainLogicalId, request.deviceId);
+            }
+            nextRemovalRetryAt = now + 5000;
+        }
         return;
     }
     if (role != DeviceRole::LAMP || lampPairing == nullptr) {
@@ -178,6 +194,13 @@ void V5ProvisioningRuntime::poll() {
     const uint32_t sourceId = announcement.deviceId;
     if (sendPacket(announcement, sourceId, 0)) {
         nextAnnounceAt = now + 5000;
+        if (announcement.pairingState == PairingState::UNPAIRING) {
+            ProvisioningPacket confirmation = {};
+            if (lampPairing->retryPreparedRemoval(confirmation)) {
+                (void)sendPacket(confirmation, confirmation.deviceId,
+                                 confirmation.parentMainId);
+            }
+        }
     } else {
         nextAnnounceAt = now + 1000;
     }
@@ -252,6 +275,155 @@ void V5ProvisioningRuntime::sendPairingOperationResult(
         response.timestamp = millis();
         (void)sendMessage(communication, response);
     }
+}
+
+void V5ProvisioningRuntime::sendRemovalResult(
+    uint32_t operationId,
+    CorePairingResultCode result,
+    const MainProvisioningReservationState& state
+) {
+    if (role != DeviceRole::MAIN || operationId == 0) return;
+    const uint32_t mainCoreId = makeCoreModuleId(CORE_LOGICAL_ID, mainLogicalId);
+    Message response = {};
+    const bool hasIdentity = state.removalOperationId == operationId &&
+        state.removalDeviceId != 0 && state.removalHardwareId[0] != '\0';
+    if (makeCoreRemovalResultMessage(mainLogicalId, mainCoreId, operationId,
+            result, hasIdentity ? state.removalDeviceId : 0,
+            hasIdentity ? state.removalHardwareId : nullptr, response)) {
+        response.timestamp = millis();
+        (void)sendMessage(communication, response);
+    }
+}
+
+void V5ProvisioningRuntime::announceAcceptedLamp(
+    const ProvisioningPacket& lamp
+) {
+    if (role != DeviceRole::MAIN) return;
+    Message announcement = {};
+    if (!makeCoreLampAnnouncementFromMain(mainLogicalId, lamp, announcement)) return;
+    announcement.id = generateMessageId();
+    announcement.timestamp = millis();
+    (void)sendMessage(communication, announcement);
+}
+
+void V5ProvisioningRuntime::processRemovalEvidence(
+    const ProvisioningPacket& packet
+) {
+    if (mainPairing == nullptr) return;
+    ProvisioningPacket response = {};
+    bool completed = false;
+    if (!mainPairing->reconcileRemovalPacket(packet, response, completed)) return;
+    lastRemovalContactAt = millis();
+    MainProvisioningReservationState state = {};
+    const uint32_t operationId = packet.transactionId;
+    if (!mainPairing->getRemovalStatus(operationId, state)) return;
+    if (state.removalState == MAIN_REMOVAL_FAILED) {
+        sendRemovalResult(operationId, CorePairingResultCode::FAILED, state);
+        return;
+    }
+    if (state.removalState != MAIN_REMOVAL_SUCCEEDED) return;
+
+    const bool commitSent = sendPacket(response, mainLogicalId, response.deviceId);
+    if (commitSent) {
+        (void)forgetZigbeeRoute(state.removalDeviceId,
+            state.removalHardwareId, CommunicationRouteScope::LOCAL_DEVICE);
+    }
+    sendRemovalResult(operationId, CorePairingResultCode::SUCCEEDED, state);
+    nextRemovalRetryAt = 0;
+}
+
+bool V5ProvisioningRuntime::handleCoreRemovalControl(const Message& message) {
+    if (role != DeviceRole::MAIN || mainPairing == nullptr ||
+        message.type != MessageType::STATE ||
+        message.commandType != CORE_REMOVAL_CONTROL_MESSAGE) return false;
+    const uint32_t mainCoreId = makeCoreModuleId(CORE_LOGICAL_ID, mainLogicalId);
+    CoreRemovalCommand command = CoreRemovalCommand::QUERY;
+    uint32_t operationId = 0;
+    uint32_t lampLocalId = 0;
+    uint32_t lampCoreId = 0;
+    if (!readCoreRemovalControlMessage(message, mainLogicalId, mainCoreId,
+            command, operationId, lampLocalId, lampCoreId)) return true;
+
+    MainProvisioningReservationState state = {};
+    if (command == CoreRemovalCommand::QUERY) {
+        if (!mainPairing->getRemovalStatus(operationId, state)) {
+            sendRemovalResult(operationId, CorePairingResultCode::NOT_FOUND, state);
+            return true;
+        }
+        CorePairingResultCode result = CorePairingResultCode::FAILED;
+        if (state.removalState == MAIN_REMOVAL_REQUESTED) {
+            result = lastRemovalContactAt != 0 &&
+                     millis() - lastRemovalContactAt <
+                         PROVISIONING_TRANSACTION_TIMEOUT_MS
+                ? CorePairingResultCode::PROCESSING
+                : CorePairingResultCode::UNCERTAIN;
+        } else if (state.removalState == MAIN_REMOVAL_SUCCEEDED) {
+            result = CorePairingResultCode::SUCCEEDED;
+        } else if (state.removalState == MAIN_REMOVAL_FAILED) {
+            result = CorePairingResultCode::FAILED;
+        }
+        sendRemovalResult(operationId, result, state);
+        return true;
+    }
+
+    if (mainPairing->getRemovalStatus(operationId, state)) {
+        if (state.removalDeviceId != lampLocalId ||
+            state.removalCoreDeviceId != lampCoreId) {
+            sendRemovalResult(operationId, CorePairingResultCode::BUSY, state);
+            return true;
+        }
+        if (state.removalState == MAIN_REMOVAL_SUCCEEDED) {
+            sendRemovalResult(operationId, CorePairingResultCode::SUCCEEDED, state);
+            return true;
+        }
+        if (state.removalState == MAIN_REMOVAL_FAILED) {
+            sendRemovalResult(operationId, CorePairingResultCode::FAILED, state);
+            return true;
+        }
+    } else if (mainPairing->hasActiveRemoval()) {
+        Lamp* target = findLamp(lamps, lampLocalId);
+        state.removalOperationId = operationId;
+        state.removalDeviceId = lampLocalId;
+        state.removalParentMainId = mainLogicalId;
+        state.removalCoreDeviceId = lampCoreId;
+        if (target != nullptr)
+            copyText(state.removalHardwareId, sizeof(state.removalHardwareId),
+                     target->identity.hardwareId);
+        sendRemovalResult(operationId, CorePairingResultCode::BUSY, state);
+        return true;
+    } else {
+        Lamp* target = findLamp(lamps, lampLocalId);
+        if (target == nullptr || activePairingOperationId != 0 ||
+            !mainPairing->beginRemoval(operationId, lampLocalId, lampCoreId)) {
+            MainProvisioningReservationState failed = {};
+            failed.removalOperationId = operationId;
+            failed.removalDeviceId = lampLocalId;
+            failed.removalParentMainId = mainLogicalId;
+            failed.removalCoreDeviceId = lampCoreId;
+            if (target != nullptr)
+                copyText(failed.removalHardwareId,
+                         sizeof(failed.removalHardwareId),
+                         target->identity.hardwareId);
+            sendRemovalResult(operationId,
+                target == nullptr ? CorePairingResultCode::NOT_FOUND
+                                  : CorePairingResultCode::FAILED,
+                failed);
+            return true;
+        }
+        (void)mainPairing->getRemovalStatus(operationId, state);
+        lastRemovalContactAt = millis();
+        nextRemovalRetryAt = 0;
+    }
+
+    ProvisioningPacket request = {};
+    const bool sent = mainPairing->buildRemovalPacket(request) &&
+        request.transactionId == operationId &&
+        sendPacket(request, mainLogicalId, request.deviceId);
+    nextRemovalRetryAt = millis() + 5000;
+    sendRemovalResult(operationId, sent ? CorePairingResultCode::PROCESSING
+                                        : CorePairingResultCode::UNCERTAIN,
+                      state);
+    return true;
 }
 
 void V5ProvisioningRuntime::clearPairingOperation() {
@@ -423,6 +595,10 @@ bool V5ProvisioningRuntime::handleMessage(
 
 bool V5ProvisioningRuntime::dispatch(const Message& message) {
     if (message.type == MessageType::STATE &&
+        message.commandType == CORE_REMOVAL_CONTROL_MESSAGE) {
+        return handleCoreRemovalControl(message);
+    }
+    if (message.type == MessageType::STATE &&
         message.commandType == CORE_PAIRING_CONTROL_MESSAGE) {
         return handleCorePairingControl(message);
     }
@@ -438,6 +614,25 @@ bool V5ProvisioningRuntime::dispatch(const Message& message) {
     if (role == DeviceRole::MAIN && mainPairing != nullptr) {
         if (packet.type == ProvisioningPacketType::DEVICE_ANNOUNCE) {
             const DiscoveryResult result = mainPairing->discover(packet);
+            if (result == DiscoveryResult::RESTORED_PAIRED ||
+                result == DiscoveryResult::RECOGNIZED_PAIRED) {
+                ProvisioningPacket announcement = packet;
+                announcement.type = ProvisioningPacketType::DEVICE_ANNOUNCE;
+                announceAcceptedLamp(announcement);
+            }
+            if (result == DiscoveryResult::REMOVAL_PENDING) {
+                lastRemovalContactAt = millis();
+                if (packet.pairingState == PairingState::UNPAIRING) {
+                    processRemovalEvidence(packet);
+                } else if (packet.pairingState == PairingState::PAIRED) {
+                    ProvisioningPacket request = {};
+                    if (mainPairing->buildRemovalPacket(request)) {
+                        (void)sendPacket(request, mainLogicalId, request.deviceId);
+                    }
+                }
+            } else if (result == DiscoveryResult::REMOVAL_RECONCILED) {
+                processRemovalEvidence(packet);
+            }
             if (result == DiscoveryResult::DISCOVERED_UNPAIRED) {
                 Serial.print("[DISCOVERY] DEVICE_ANNOUNCE hardwareId=");
                 Serial.print(packet.hardwareId);
@@ -472,13 +667,26 @@ bool V5ProvisioningRuntime::dispatch(const Message& message) {
                 Serial.println(packet.deviceId);
             } else if (result == DiscoveryResult::IDENTITY_CONFLICT) {
                 Serial.println("[PAIRING] identity conflict; no new pairing");
+                if (mainPairing->isRemovedIdentity(packet.deviceId,
+                                                   packet.hardwareId)) {
+                    (void)forgetZigbeeRoute(packet.deviceId, packet.hardwareId,
+                        CommunicationRouteScope::LOCAL_DEVICE);
+                }
             }
+            return true;
+        }
+        if (packet.type == ProvisioningPacketType::UNPAIR_CONFIRM ||
+            packet.type == ProvisioningPacketType::UNPAIR_REJECT) {
+            processRemovalEvidence(packet);
             return true;
         }
         if (packet.type == ProvisioningPacketType::PAIR_CONFIRM) {
             if (mainPairing->confirmPairing(packet)) {
                 Serial.print("[PAIRING] PAIRED deviceId=");
                 Serial.println(packet.deviceId);
+                ProvisioningPacket announcement = packet;
+                announcement.type = ProvisioningPacketType::DEVICE_ANNOUNCE;
+                announceAcceptedLamp(announcement);
                 if (activePairingOperationId != 0 &&
                     strncmp(activePairingHardwareId, packet.hardwareId,
                             sizeof(activePairingHardwareId)) == 0) {
@@ -528,6 +736,28 @@ bool V5ProvisioningRuntime::dispatch(const Message& message) {
                 }
             } else {
                 Serial.println("[PAIRING] PAIR_ACCEPT rejected");
+            }
+            return true;
+        }
+        if (packet.type == ProvisioningPacketType::UNPAIR_REQUEST) {
+            ProvisioningPacket response = {};
+            const bool accepted = lampPairing->handleUnpairRequest(packet, response);
+            if (accepted && response.type == ProvisioningPacketType::UNPAIR_CONFIRM) {
+                (void)removeLamp(lamps, response.deviceId);
+                (void)sendPacket(response, response.deviceId,
+                                 response.parentMainId);
+                Serial.println("[UNPAIR] application binding cleared; confirmation sent");
+            } else if (response.type == ProvisioningPacketType::UNPAIR_REJECT) {
+                (void)sendPacket(response, response.deviceId,
+                                 response.parentMainId);
+                Serial.println("[UNPAIR] request rejected; association preserved");
+            }
+            return true;
+        }
+        if (packet.type == ProvisioningPacketType::UNPAIR_COMMIT) {
+            if (lampPairing->handleUnpairCommit(packet)) {
+                (void)removeLamp(lamps, packet.deviceId);
+                Serial.println("[UNPAIR] durable receipt acknowledged; lamp unpaired");
             }
             return true;
         }

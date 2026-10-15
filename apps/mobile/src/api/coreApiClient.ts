@@ -17,6 +17,10 @@ import type {
   PairingSession,
   PairingSessionResponse,
   PowerState,
+  RemovalOperation,
+  RemovalOperationResponse,
+  RemovalOperationState,
+  RemovalOperationSubmissionResponse,
   SubmitPowerResponse,
   V7Id,
 } from './types';
@@ -73,6 +77,7 @@ interface RequestOptions {
   token?: string;
   body?: string;
   signal?: AbortSignal;
+  acceptStatuses?: readonly number[];
 }
 
 async function requestJson(ip: string, path: string, options: RequestOptions = {})
@@ -118,7 +123,7 @@ async function requestJson(ip: string, path: string, options: RequestOptions = {
       }
       throw new CoreApiError('invalid_response', 'Réponse JSON illisible du CORE.');
     }
-    if (!response.ok) {
+    if (!response.ok && !options.acceptStatuses?.includes(response.status)) {
       const error = isRecord(body) && isRecord(body.error) ? body.error : null;
       throw new CoreApiError(
         'http',
@@ -222,6 +227,61 @@ const PAIRING_SESSION_STATES = [
 const PAIRING_OPERATION_STATES: readonly PairingOperationState[] = [
   'pending', 'processing', 'succeeded', 'failed', 'rejected', 'expired', 'uncertain',
 ];
+const REMOVAL_OPERATION_STATES: readonly RemovalOperationState[] = [
+  'processing', 'succeeded', 'failed', 'uncertain', 'not_found',
+];
+
+function isRemovalOperation(value: unknown): value is RemovalOperation {
+  return isRecord(value) && isV7Id(value.id) &&
+    Number.isInteger(value.device_id) && Number(value.device_id) >= 0 &&
+    Number(value.device_id) <= 0xffffffff &&
+    REMOVAL_OPERATION_STATES.includes(value.state as RemovalOperationState) &&
+    (value.result_code === undefined || typeof value.result_code === 'string');
+}
+
+export async function requestDeviceRemoval(ip: string, deviceId: V7Id,
+  operationId: V7Id, token: string, signal?: AbortSignal)
+  : Promise<RemovalOperationSubmissionResponse> {
+  if (!isV7Id(deviceId) || !isV7Id(operationId)) return invalidResponse();
+
+  const response = await requestJson(ip, `/devices/${deviceId}/removal-operations`, {
+    method: 'POST', token, body: JSON.stringify({ operation_id: operationId }), signal,
+    acceptStatuses: [200, 202, 503],
+  });
+
+  const operation = isRecord(response.body) ? response.body.operation : undefined;
+  if (response.status === 503 && isRemovalOperation(operation) &&
+      operation.id === operationId && operation.device_id === deviceId &&
+      operation.state === 'uncertain') {
+    return { operation };
+  }
+  if (response.status === 503 && isRecord(response.body) && isRecord(response.body.error)) {
+    const error = response.body.error;
+    throw new CoreApiError('http', 'Le CORE a refusé la demande de retrait.', 503,
+      typeof error.code === 'string' ? error.code : undefined);
+  }
+  if ((response.status !== 202 && response.status !== 200) ||
+      !isRemovalOperation(operation) || operation.id !== operationId ||
+      operation.device_id !== deviceId) {
+    throw new CoreApiError('submission_uncertain',
+      'Réponse de retrait inattendue : vérifiez le même identifiant avant toute autre action.');
+  }
+  return { operation };
+}
+
+export async function getRemovalOperation(ip: string, operationId: V7Id,
+  expectedDeviceId: V7Id, token: string, signal?: AbortSignal)
+  : Promise<RemovalOperationResponse> {
+  if (!isV7Id(operationId) || !isV7Id(expectedDeviceId)) return invalidResponse();
+  const body = (await requestJson(ip, `/removal-operations/${operationId}`, {
+    token, signal,
+  })).body;
+  if (!isRecord(body) || !isRemovalOperation(body.operation) ||
+      body.operation.id !== operationId ||
+      (body.operation.device_id !== 0 && body.operation.device_id !== expectedDeviceId) ||
+      typeof body.operation.result_code !== 'string') return invalidResponse();
+  return body as unknown as RemovalOperationResponse;
+}
 
 export function isValidPairingHardwareId(value: string): boolean {
   return /^C6-[0-9A-Fa-f]{16}$/.test(value);
@@ -369,6 +429,13 @@ export function describeApiError(error: unknown): string {
       case 'pairing_in_progress': return 'Un appairage est déjà en cours.';
       case 'main_offline': return 'Le MAIN est hors ligne.';
       case 'pairing_transport_uncertain': return 'Le transport est incertain. Consultez l’état avant de réessayer.';
+      case 'removal_api_disabled': return 'Le retrait est désactivé sur ce CORE.';
+      case 'removal_in_progress': return 'Un retrait non résolu est déjà en cours.';
+      case 'command_unresolved': return 'Une commande de cette lampe est en attente ou son résultat est incertain.';
+      case 'main_unavailable': return 'Le MAIN est indisponible. Vérifiez sa connexion avant le retrait.';
+      case 'unsupported_topology': return 'Le retrait mobile ne prend en charge qu’un seul MAIN.';
+      case 'removal_transport_uncertain':
+      case 'removal_query_uncertain': return 'La demande de retrait est incertaine. Reprenez le suivi avec le même identifiant.';
       default: break;
     }
     return `Erreur HTTP ${error.status ?? '?'}${error.code ? ` (${error.code})` : ''}.`;

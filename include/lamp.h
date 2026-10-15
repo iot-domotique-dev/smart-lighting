@@ -17,7 +17,8 @@ struct LampState {
 enum class PairingState : uint8_t {
     UNPAIRED,
     PAIRING,
-    PAIRED
+    PAIRED,
+    UNPAIRING
 };
 
 constexpr uint8_t LAMP_HARDWARE_ID_LENGTH = 32;
@@ -30,6 +31,7 @@ struct LampIdentity {
     char name[LAMP_NAME_LENGTH];
     uint32_t parentMainId;
     PairingState pairingState;
+    bool removalPending;
 };
 
 

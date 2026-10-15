@@ -33,7 +33,10 @@ enum class CoreLinkPairingAction : uint8_t {
     PAIR_CANDIDATE = 4,
     SESSION_RESULT = 5,
     OPERATION_RESULT = 6,
-    CANDIDATE_LIMIT = 7
+    CANDIDATE_LIMIT = 7,
+    REMOVE_DEVICE = 8,
+    QUERY_REMOVAL = 9,
+    REMOVAL_RESULT = 10
 };
 
 enum class CorePairingResultCode : uint8_t {

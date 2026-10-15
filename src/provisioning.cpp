@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include "provisioning.h"
+#include "core_module_service.h"
 
 static void copyText(char* destination, size_t capacity, const char* source) {
     if (capacity == 0) {
@@ -22,6 +23,44 @@ static bool sameText(const char* left, const char* right) {
     return left != nullptr && right != nullptr && strcmp(left, right) == 0;
 }
 
+static bool hasValidRemovalEnvelope(
+    ProvisioningPacketType type,
+    PairingState state,
+    DeviceRole role,
+    uint32_t deviceId,
+    uint32_t parentMainId,
+    uint32_t sourceId,
+    uint32_t destinationId
+) {
+    switch (type) {
+        case ProvisioningPacketType::UNPAIR_REQUEST:
+            return role == DeviceRole::MAIN && parentMainId != 0 &&
+                   state == PairingState::UNPAIRING &&
+                   sourceId == parentMainId && destinationId == deviceId;
+        case ProvisioningPacketType::UNPAIR_COMMIT:
+            return role == DeviceRole::MAIN && parentMainId != 0 &&
+                   state == PairingState::UNPAIRED &&
+                   sourceId == parentMainId && destinationId == deviceId;
+        case ProvisioningPacketType::UNPAIR_CONFIRM:
+            return role == DeviceRole::LAMP && deviceId != 0 &&
+                   state == PairingState::UNPAIRING &&
+                   sourceId == deviceId && destinationId == parentMainId;
+        case ProvisioningPacketType::UNPAIR_REJECT:
+            return role == DeviceRole::LAMP && deviceId != 0 &&
+                   sourceId == deviceId && destinationId == parentMainId;
+        case ProvisioningPacketType::DEVICE_ANNOUNCE:
+            if (state != PairingState::UNPAIRING) return true;
+            return role == DeviceRole::LAMP && deviceId != 0 &&
+                   sourceId == deviceId && destinationId == 0;
+        case ProvisioningPacketType::PAIR_REQUEST:
+        case ProvisioningPacketType::PAIR_ACCEPT:
+        case ProvisioningPacketType::PAIR_CONFIRM:
+        case ProvisioningPacketType::PAIR_REJECT:
+            return true;
+    }
+    return false;
+}
+
 static bool packetTypeToMessageType(
     ProvisioningPacketType packetType,
     MessageType& messageType
@@ -41,6 +80,18 @@ static bool packetTypeToMessageType(
             return true;
         case ProvisioningPacketType::PAIR_REJECT:
             messageType = MessageType::PAIR_REJECT;
+            return true;
+        case ProvisioningPacketType::UNPAIR_REQUEST:
+            messageType = MessageType::UNPAIR_REQUEST;
+            return true;
+        case ProvisioningPacketType::UNPAIR_CONFIRM:
+            messageType = MessageType::UNPAIR_CONFIRM;
+            return true;
+        case ProvisioningPacketType::UNPAIR_COMMIT:
+            messageType = MessageType::UNPAIR_COMMIT;
+            return true;
+        case ProvisioningPacketType::UNPAIR_REJECT:
+            messageType = MessageType::UNPAIR_REJECT;
             return true;
     }
     return false;
@@ -66,6 +117,18 @@ static bool messageTypeToPacketType(
         case MessageType::PAIR_REJECT:
             packetType = ProvisioningPacketType::PAIR_REJECT;
             return true;
+        case MessageType::UNPAIR_REQUEST:
+            packetType = ProvisioningPacketType::UNPAIR_REQUEST;
+            return true;
+        case MessageType::UNPAIR_CONFIRM:
+            packetType = ProvisioningPacketType::UNPAIR_CONFIRM;
+            return true;
+        case MessageType::UNPAIR_COMMIT:
+            packetType = ProvisioningPacketType::UNPAIR_COMMIT;
+            return true;
+        case MessageType::UNPAIR_REJECT:
+            packetType = ProvisioningPacketType::UNPAIR_REJECT;
+            return true;
         default:
             return false;
     }
@@ -82,8 +145,10 @@ ProvisioningLamp::ProvisioningLamp(
       pairingState(PairingState::UNPAIRED),
       pendingMainId(0),
       pendingStartedAt(0),
-      hasPendingRequest(false) {
+      hasPendingRequest(false),
+      hasRemovalReceipt(false) {
     memset(&configuration, 0, sizeof(configuration));
+    memset(&removalReceipt, 0, sizeof(removalReceipt));
     copyText(hardwareId, sizeof(hardwareId), hardwareIdValue);
     copyText(firmwareVersion, sizeof(firmwareVersion), firmwareVersionValue);
 
@@ -96,17 +161,40 @@ ProvisioningLamp::ProvisioningLamp(
         configuration.name[sizeof(configuration.name) - 1] = '\0';
         pairingState = PairingState::PAIRED;
     }
+
+    LampRemovalReceipt receipt = {};
+    if (store.loadRemovalReceipt(receipt) &&
+        receipt.version == LAMP_REMOVAL_RECEIPT_VERSION &&
+        receipt.operationId != 0 && receipt.deviceId != 0 &&
+        receipt.parentMainId != 0 && sameText(receipt.hardwareId, hardwareId) &&
+        (receipt.stage == LampRemovalReceiptStage::PREPARED ||
+         receipt.stage == LampRemovalReceiptStage::CLEARED)) {
+        removalReceipt = receipt;
+        removalReceipt.hardwareId[sizeof(removalReceipt.hardwareId) - 1] = '\0';
+        hasRemovalReceipt = true;
+        pairingState = PairingState::UNPAIRING;
+        (void)finishPreparedRemoval();
+    }
 }
 
 ProvisioningPacket ProvisioningLamp::announce() const {
     ProvisioningPacket packet = {};
     packet.type = ProvisioningPacketType::DEVICE_ANNOUNCE;
     packet.role = DeviceRole::LAMP;
-    packet.pairingState = pairingState;
+    packet.pairingState = hasRemovalReceipt
+        ? (configuration.deviceId == 0 ? PairingState::UNPAIRING : PairingState::PAIRED)
+        : pairingState;
     packet.capabilities = capabilities;
     // Keep periodic broadcast announcements short enough for APS transmission.
     copyText(packet.hardwareId, sizeof(packet.hardwareId), hardwareId);
-    if (pairingState == PairingState::PAIRED) {
+    if (hasRemovalReceipt) {
+        packet.deviceId = removalReceipt.deviceId;
+        packet.parentMainId = removalReceipt.parentMainId;
+        packet.transactionId = removalReceipt.operationId;
+        if (configuration.deviceId != 0) {
+            copyText(packet.name, sizeof(packet.name), configuration.name);
+        }
+    } else if (pairingState == PairingState::PAIRED) {
         packet.deviceId = configuration.deviceId;
         packet.parentMainId = configuration.parentMainId;
         copyText(packet.name, sizeof(packet.name), configuration.name);
@@ -130,7 +218,7 @@ bool ProvisioningLamp::handlePairRequest(
         !sameText(request.hardwareId, hardwareId) || request.parentMainId == 0) {
         return false;
     }
-    if (pairingState == PairingState::PAIRED) {
+    if (pairingState == PairingState::PAIRED || hasRemovalReceipt) {
         return false;
     }
     if (hasPendingRequest && pendingMainId != request.parentMainId) {
@@ -201,7 +289,133 @@ bool ProvisioningLamp::handlePairAccept(
 }
 
 PairingState ProvisioningLamp::state() const {
-    return pairingState;
+    return hasRemovalReceipt ? PairingState::UNPAIRING : pairingState;
+}
+
+bool ProvisioningLamp::finishPreparedRemoval() {
+    if (!hasRemovalReceipt) return false;
+    if (removalReceipt.stage == LampRemovalReceiptStage::CLEARED) {
+        if (configuration.deviceId != 0) {
+            const bool sameRecord = configuration.deviceId == removalReceipt.deviceId &&
+                configuration.parentMainId == removalReceipt.parentMainId &&
+                sameText(configuration.hardwareId, removalReceipt.hardwareId);
+            if (!sameRecord || !store.clear()) return false;
+            memset(&configuration, 0, sizeof(configuration));
+        }
+        pairingState = PairingState::UNPAIRING;
+        return true;
+    }
+    const bool exactCurrentRecord = configuration.deviceId == removalReceipt.deviceId &&
+        configuration.parentMainId == removalReceipt.parentMainId &&
+        sameText(configuration.hardwareId, removalReceipt.hardwareId);
+    const bool noCurrentRecord = configuration.deviceId == 0;
+    if (!exactCurrentRecord && !noCurrentRecord) return false;
+    if (exactCurrentRecord && !store.clear()) return false;
+    memset(&configuration, 0, sizeof(configuration));
+    pairingState = PairingState::UNPAIRING;
+    removalReceipt.stage = LampRemovalReceiptStage::CLEARED;
+    if (!store.saveRemovalReceipt(removalReceipt)) {
+        removalReceipt.stage = LampRemovalReceiptStage::PREPARED;
+        return false;
+    }
+    return true;
+}
+
+bool ProvisioningLamp::retryPreparedRemoval(
+    ProvisioningPacket& confirmation
+) {
+    if (!finishPreparedRemoval() ||
+        removalReceipt.stage != LampRemovalReceiptStage::CLEARED) return false;
+    confirmation = {};
+    confirmation.type = ProvisioningPacketType::UNPAIR_CONFIRM;
+    confirmation.role = DeviceRole::LAMP;
+    confirmation.pairingState = PairingState::UNPAIRING;
+    confirmation.deviceId = removalReceipt.deviceId;
+    confirmation.parentMainId = removalReceipt.parentMainId;
+    confirmation.transactionId = removalReceipt.operationId;
+    copyText(confirmation.hardwareId, sizeof(confirmation.hardwareId), hardwareId);
+    return true;
+}
+
+bool ProvisioningLamp::handleUnpairRequest(
+    const ProvisioningPacket& request,
+    ProvisioningPacket& confirmation
+) {
+    confirmation = {};
+    if (request.type != ProvisioningPacketType::UNPAIR_REQUEST ||
+        request.role != DeviceRole::MAIN || request.transactionId == 0 ||
+        request.pairingState != PairingState::UNPAIRING ||
+        request.deviceId == 0 || request.parentMainId == 0 ||
+        request.sourceId != request.parentMainId ||
+        request.destinationId != request.deviceId ||
+        !sameText(request.hardwareId, hardwareId)) return false;
+
+    auto reject = [&]() {
+        confirmation = {};
+        confirmation.type = ProvisioningPacketType::UNPAIR_REJECT;
+        confirmation.role = DeviceRole::LAMP;
+        confirmation.deviceId = request.deviceId;
+        confirmation.parentMainId = request.parentMainId;
+        confirmation.transactionId = request.transactionId;
+        confirmation.pairingState = pairingState;
+        copyText(confirmation.hardwareId, sizeof(confirmation.hardwareId), hardwareId);
+    };
+
+    if (hasRemovalReceipt) {
+        if (removalReceipt.operationId != request.transactionId ||
+            removalReceipt.deviceId != request.deviceId ||
+            removalReceipt.parentMainId != request.parentMainId ||
+            !sameText(removalReceipt.hardwareId, request.hardwareId)) {
+            reject();
+            return false;
+        }
+        return retryPreparedRemoval(confirmation);
+    }
+
+    if (pairingState != PairingState::PAIRED ||
+        configuration.deviceId != request.deviceId ||
+        configuration.parentMainId != request.parentMainId ||
+        !sameText(configuration.hardwareId, request.hardwareId)) {
+        reject();
+        return false;
+    }
+
+    LampRemovalReceipt receipt = {};
+    receipt.version = LAMP_REMOVAL_RECEIPT_VERSION;
+    receipt.stage = LampRemovalReceiptStage::PREPARED;
+    receipt.operationId = request.transactionId;
+    receipt.deviceId = configuration.deviceId;
+    receipt.parentMainId = configuration.parentMainId;
+    copyText(receipt.hardwareId, sizeof(receipt.hardwareId), hardwareId);
+    if (!store.saveRemovalReceipt(receipt)) {
+        reject();
+        return false;
+    }
+    removalReceipt = receipt;
+    hasRemovalReceipt = true;
+    pairingState = PairingState::UNPAIRING;
+    return retryPreparedRemoval(confirmation);
+}
+
+bool ProvisioningLamp::handleUnpairCommit(
+    const ProvisioningPacket& commit
+) {
+    if (!hasRemovalReceipt ||
+        commit.type != ProvisioningPacketType::UNPAIR_COMMIT ||
+        commit.role != DeviceRole::MAIN ||
+        commit.pairingState != PairingState::UNPAIRED ||
+        commit.sourceId != commit.parentMainId ||
+        commit.destinationId != commit.deviceId ||
+        commit.transactionId != removalReceipt.operationId ||
+        commit.deviceId != removalReceipt.deviceId ||
+        commit.parentMainId != removalReceipt.parentMainId ||
+        !sameText(commit.hardwareId, removalReceipt.hardwareId) ||
+        removalReceipt.stage != LampRemovalReceiptStage::CLEARED ||
+        !store.clearRemovalReceipt()) return false;
+    memset(&removalReceipt, 0, sizeof(removalReceipt));
+    hasRemovalReceipt = false;
+    pairingState = PairingState::UNPAIRED;
+    return true;
 }
 
 void ProvisioningLamp::expirePendingRequest(uint32_t now) {
@@ -267,6 +481,7 @@ bool MainProvisioning::hasUnpairedCandidate(const char* hardwareIdValue) const {
 
 bool MainProvisioning::canPairCandidate(const char* hardwareIdValue) const {
     if (!reservationStoreReady || !commissioningEnabled || hasPendingPairing ||
+        hasActiveRemoval() ||
         hardwareIdValue == nullptr || hardwareIdValue[0] == '\0' ||
         pairingCapacityReached(hardwareIdValue)) return false;
     const int8_t index = findDiscovered(hardwareIdValue);
@@ -402,8 +617,12 @@ bool MainProvisioning::recordPairedIdentity(
     const ProvisioningPacket& announcement
 ) {
     if (!reservationStoreReady) {
-        // Legacy V7 pairings can still be restored; new pairings stay disabled.
-        return announcement.deviceId <= MAX_LAMPS;
+        // Preserve the no-store legacy test mode, but fail closed on a bad NVS blob.
+        return reservationStore == nullptr && announcement.deviceId <= MAX_LAMPS;
+    }
+
+    if (isRemovedIdentity(announcement.deviceId, announcement.hardwareId)) {
+        return false;
     }
 
     const int8_t byHardware =
@@ -459,12 +678,31 @@ DiscoveryResult MainProvisioning::discover(
         announcement.hardwareId[0] == '\0' ||
         (announcement.pairingState != PairingState::UNPAIRED &&
          announcement.pairingState != PairingState::PAIRING &&
-         announcement.pairingState != PairingState::PAIRED)) {
+         announcement.pairingState != PairingState::PAIRED &&
+         announcement.pairingState != PairingState::UNPAIRING)) {
         return DiscoveryResult::INVALID_ANNOUNCEMENT;
     }
     if (announcement.pairingState == PairingState::PAIRED &&
         (announcement.deviceId == 0 || announcement.parentMainId == 0)) {
         return DiscoveryResult::INVALID_ANNOUNCEMENT;
+    }
+    if (announcement.pairingState == PairingState::UNPAIRING &&
+        (announcement.deviceId == 0 || announcement.parentMainId != mainId ||
+         announcement.transactionId == 0)) {
+        return DiscoveryResult::INVALID_ANNOUNCEMENT;
+    }
+    if (announcement.pairingState == PairingState::UNPAIRING) {
+        if (reservationState.removalOperationId == announcement.transactionId &&
+            reservationState.removalDeviceId == announcement.deviceId &&
+            reservationState.removalParentMainId == announcement.parentMainId &&
+            sameText(reservationState.removalHardwareId, announcement.hardwareId) &&
+            (reservationState.removalState == MAIN_REMOVAL_REQUESTED ||
+             reservationState.removalState == MAIN_REMOVAL_SUCCEEDED)) {
+            return reservationState.removalState == MAIN_REMOVAL_REQUESTED
+                ? DiscoveryResult::REMOVAL_PENDING
+                : DiscoveryResult::REMOVAL_RECONCILED;
+        }
+        return DiscoveryResult::IDENTITY_CONFLICT;
     }
 
     const int8_t previousIndex = findDiscovered(announcement.hardwareId);
@@ -488,6 +726,13 @@ DiscoveryResult MainProvisioning::discover(
 
     if (announcement.parentMainId != mainId) {
         return DiscoveryResult::DISCOVERED_OTHER_MAIN;
+    }
+    if (reservationState.removalState == MAIN_REMOVAL_REQUESTED &&
+        reservationState.removalDeviceId == announcement.deviceId &&
+        sameText(reservationState.removalHardwareId, announcement.hardwareId)) {
+        Lamp* target = findLamp(registry, announcement.deviceId);
+        if (target != nullptr) target->identity.removalPending = true;
+        return DiscoveryResult::REMOVAL_PENDING;
     }
     if (!recordPairedIdentity(announcement)) {
         return DiscoveryResult::IDENTITY_CONFLICT;
@@ -519,6 +764,7 @@ DiscoveryResult MainProvisioning::discover(
              announcement.name[0] == '\0' ? "LAMP" : announcement.name);
     restored.identity.parentMainId = mainId;
     restored.identity.pairingState = PairingState::PAIRED;
+    restored.identity.removalPending = false;
     if (!addLamp(registry, restored)) {
         return DiscoveryResult::IDENTITY_CONFLICT;
     }
@@ -645,6 +891,178 @@ bool MainProvisioning::confirmPairing(
     return true;
 }
 
+bool MainProvisioning::beginRemoval(uint32_t operationId, uint32_t deviceId,
+                                    uint32_t coreDeviceId) {
+    if (!reservationStoreReady || operationId == 0 || deviceId == 0 ||
+        coreDeviceId == 0 || hasPendingPairing ||
+        reservationState.removalState == MAIN_REMOVAL_REQUESTED) return false;
+    Lamp* lamp = findLamp(registry, deviceId);
+    const uint32_t mainCoreId = makeCoreModuleId(CORE_LOGICAL_ID, mainId);
+    if (lamp == nullptr || lamp->identity.pairingState != PairingState::PAIRED ||
+        lamp->identity.removalPending || lamp->identity.parentMainId != mainId ||
+        lamp->device.status != DeviceStatus::ONLINE ||
+        lamp->identity.hardwareId[0] == '\0' ||
+        coreDeviceId != makeCoreModuleId(mainCoreId, deviceId)) return false;
+    const int8_t reservationIndex = findReservationByHardwareId(
+        lamp->identity.hardwareId);
+    if (reservationIndex < 0 ||
+        reservationState.identities[reservationIndex].deviceId != deviceId) return false;
+
+    MainProvisioningReservationState next = reservationState;
+    next.removalState = MAIN_REMOVAL_REQUESTED;
+    next.removalOperationId = operationId;
+    next.removalDeviceId = deviceId;
+    next.removalParentMainId = mainId;
+    next.removalCoreDeviceId = coreDeviceId;
+    copyText(next.removalHardwareId, sizeof(next.removalHardwareId),
+             lamp->identity.hardwareId);
+    if (!saveReservationState(next)) return false;
+    lamp->identity.removalPending = true;
+    return true;
+}
+
+bool MainProvisioning::buildRemovalPacket(ProvisioningPacket& packet) const {
+    if (reservationState.removalState != MAIN_REMOVAL_REQUESTED) return false;
+    packet = {};
+    packet.type = ProvisioningPacketType::UNPAIR_REQUEST;
+    packet.role = DeviceRole::MAIN;
+    packet.deviceId = reservationState.removalDeviceId;
+    packet.parentMainId = reservationState.removalParentMainId;
+    packet.transactionId = reservationState.removalOperationId;
+    packet.pairingState = PairingState::UNPAIRING;
+    copyText(packet.hardwareId, sizeof(packet.hardwareId),
+             reservationState.removalHardwareId);
+    return true;
+}
+
+bool MainProvisioning::reconcileRemovalPacket(
+    const ProvisioningPacket& packet,
+    ProvisioningPacket& response,
+    bool& removalCompleted
+) {
+    removalCompleted = false;
+    response = {};
+    const bool matches = reservationState.removalOperationId != 0 &&
+        packet.transactionId == reservationState.removalOperationId &&
+        packet.deviceId == reservationState.removalDeviceId &&
+        packet.parentMainId == reservationState.removalParentMainId &&
+        sameText(packet.hardwareId, reservationState.removalHardwareId);
+    if (!matches) return false;
+
+    if (packet.role != DeviceRole::LAMP) return false;
+    const bool expectedTransport =
+        ((packet.type == ProvisioningPacketType::UNPAIR_CONFIRM ||
+          packet.type == ProvisioningPacketType::UNPAIR_REJECT) &&
+         packet.sourceId == packet.deviceId &&
+         packet.destinationId == packet.parentMainId) ||
+        (packet.type == ProvisioningPacketType::DEVICE_ANNOUNCE &&
+         packet.pairingState == PairingState::UNPAIRING &&
+         packet.sourceId == packet.deviceId && packet.destinationId == 0);
+    if (!expectedTransport) return false;
+    if (packet.type == ProvisioningPacketType::UNPAIR_REJECT) {
+        if (reservationState.removalState != MAIN_REMOVAL_REQUESTED) return false;
+        MainProvisioningReservationState failed = reservationState;
+        failed.removalState = MAIN_REMOVAL_FAILED;
+        if (!saveReservationState(failed)) return false;
+        Lamp* lamp = findLamp(registry, failed.removalDeviceId);
+        if (lamp != nullptr) lamp->identity.removalPending = false;
+        return true;
+    }
+
+    if (reservationState.removalState == MAIN_REMOVAL_SUCCEEDED) {
+        if (packet.type != ProvisioningPacketType::UNPAIR_CONFIRM &&
+            !(packet.type == ProvisioningPacketType::DEVICE_ANNOUNCE &&
+              packet.pairingState == PairingState::UNPAIRING)) return false;
+        if (packet.type == ProvisioningPacketType::UNPAIR_CONFIRM &&
+            packet.pairingState != PairingState::UNPAIRING) return false;
+        response = packet;
+        response.type = ProvisioningPacketType::UNPAIR_COMMIT;
+        response.role = DeviceRole::MAIN;
+        response.pairingState = PairingState::UNPAIRED;
+        removalCompleted = true;
+        return true;
+    }
+
+    if (reservationState.removalState != MAIN_REMOVAL_REQUESTED ||
+        (packet.type != ProvisioningPacketType::UNPAIR_CONFIRM &&
+         !(packet.type == ProvisioningPacketType::DEVICE_ANNOUNCE &&
+           packet.pairingState == PairingState::UNPAIRING))) return false;
+    if (packet.type == ProvisioningPacketType::UNPAIR_CONFIRM &&
+        packet.pairingState != PairingState::UNPAIRING) return false;
+
+    MainProvisioningReservationState next = reservationState;
+    const int8_t index = findReservationByHardwareId(
+        reservationState.removalHardwareId);
+    if (index < 0 ||
+        reservationState.identities[index].deviceId != reservationState.removalDeviceId) {
+        return false;
+    }
+    if (next.removalDeviceId <= MAX_LAMPS) {
+        next.retiredLegacyIds |= static_cast<uint16_t>(
+            1U << (next.removalDeviceId - 1U));
+    }
+    for (uint8_t move = static_cast<uint8_t>(index); move + 1 < next.count; ++move)
+        next.identities[move] = next.identities[move + 1];
+    --next.count;
+    memset(&next.identities[next.count], 0, sizeof(next.identities[next.count]));
+    next.removalState = MAIN_REMOVAL_SUCCEEDED;
+    if (!saveReservationState(next)) return false;
+
+    (void)removeLamp(registry, reservationState.removalDeviceId);
+    response = packet;
+    response.type = ProvisioningPacketType::UNPAIR_COMMIT;
+    response.role = DeviceRole::MAIN;
+    response.pairingState = PairingState::UNPAIRED;
+    removalCompleted = true;
+    return true;
+}
+
+bool MainProvisioning::getRemovalStatus(
+    uint32_t operationId,
+    MainProvisioningReservationState& state
+) const {
+    if (operationId == 0 || operationId != reservationState.removalOperationId ||
+        reservationState.removalState == MAIN_REMOVAL_NONE) return false;
+    state = reservationState;
+    return true;
+}
+
+bool MainProvisioning::isRemovalTarget(uint32_t deviceId) const {
+    return reservationState.removalState == MAIN_REMOVAL_REQUESTED &&
+           reservationState.removalDeviceId == deviceId;
+}
+
+bool MainProvisioning::isRemovedIdentity(uint32_t deviceId,
+                                         const char* hardwareIdValue) const {
+    if (deviceId == 0 || hardwareIdValue == nullptr || hardwareIdValue[0] == '\0')
+        return false;
+    if (deviceId <= MAX_LAMPS &&
+        (reservationState.retiredLegacyIds &
+         static_cast<uint16_t>(1U << (deviceId - 1U))) != 0) return true;
+    if (deviceId > MAX_LAMPS &&
+        deviceId <= reservationState.highWaterDeviceId &&
+        findReservationByDeviceId(deviceId) < 0) return true;
+    return reservationState.removalState == MAIN_REMOVAL_SUCCEEDED &&
+           reservationState.removalDeviceId == deviceId &&
+           sameText(reservationState.removalHardwareId, hardwareIdValue);
+}
+
+bool MainProvisioning::hasActiveRemoval() const {
+    return reservationState.removalState == MAIN_REMOVAL_REQUESTED;
+}
+
+uint32_t MainProvisioning::removalOperationId() const {
+    return reservationState.removalOperationId;
+}
+
+uint32_t MainProvisioning::removalDeviceId() const {
+    return reservationState.removalDeviceId;
+}
+
+uint8_t MainProvisioning::removalState() const {
+    return reservationState.removalState;
+}
+
 bool encodeProvisioningPacket(
     const ProvisioningPacket& packet,
     uint32_t messageId,
@@ -653,8 +1071,20 @@ bool encodeProvisioningPacket(
     Message& message
 ) {
     MessageType messageType;
+    const bool requiresTransaction =
+        packet.type == ProvisioningPacketType::UNPAIR_REQUEST ||
+        packet.type == ProvisioningPacketType::UNPAIR_CONFIRM ||
+        packet.type == ProvisioningPacketType::UNPAIR_COMMIT ||
+        packet.type == ProvisioningPacketType::UNPAIR_REJECT ||
+        (packet.type == ProvisioningPacketType::DEVICE_ANNOUNCE &&
+         packet.pairingState == PairingState::UNPAIRING);
     if (!packetTypeToMessageType(packet.type, messageType) ||
-        packet.hardwareId[0] == '\0') {
+        packet.hardwareId[0] == '\0' ||
+        (requiresTransaction && (packet.transactionId == 0 ||
+                                 packet.deviceId == 0 ||
+                                 packet.parentMainId == 0)) ||
+        !hasValidRemovalEnvelope(packet.type, packet.pairingState, packet.role,
+            packet.deviceId, packet.parentMainId, sourceId, destinationId)) {
         return false;
     }
     message = {};
@@ -673,6 +1103,7 @@ bool encodeProvisioningPacket(
     message.provisioningDeviceId = packet.deviceId;
     message.deviceRole = static_cast<uint8_t>(packet.role);
     message.pairingState = static_cast<uint8_t>(packet.pairingState);
+    message.value = static_cast<int32_t>(packet.transactionId);
     return true;
 }
 
@@ -684,19 +1115,33 @@ bool decodeProvisioningPacket(
     if (!messageTypeToPacketType(message.type, packetType) ||
         message.hardwareId[0] == '\0' ||
         message.deviceRole > static_cast<uint8_t>(DeviceRole::RELAY) ||
-        message.pairingState > static_cast<uint8_t>(PairingState::PAIRED)) {
+        message.pairingState > static_cast<uint8_t>(PairingState::UNPAIRING)) {
         return false;
     }
     packet = {};
     packet.type = packetType;
     packet.role = static_cast<DeviceRole>(message.deviceRole);
     packet.pairingState = static_cast<PairingState>(message.pairingState);
+    packet.transactionId = static_cast<uint32_t>(message.value);
     packet.deviceId = message.provisioningDeviceId;
     packet.parentMainId = message.parentMainId;
+    packet.sourceId = message.sourceId;
+    packet.destinationId = message.destinationId;
     packet.capabilities = message.capabilities;
     copyText(packet.hardwareId, sizeof(packet.hardwareId), message.hardwareId);
     copyText(packet.name, sizeof(packet.name), message.name);
     copyText(packet.firmwareVersion, sizeof(packet.firmwareVersion),
              message.firmwareVersion);
-    return true;
+    const bool requiresTransaction =
+        packet.type == ProvisioningPacketType::UNPAIR_REQUEST ||
+        packet.type == ProvisioningPacketType::UNPAIR_CONFIRM ||
+        packet.type == ProvisioningPacketType::UNPAIR_COMMIT ||
+        packet.type == ProvisioningPacketType::UNPAIR_REJECT ||
+        (packet.type == ProvisioningPacketType::DEVICE_ANNOUNCE &&
+         packet.pairingState == PairingState::UNPAIRING);
+    if (requiresTransaction && (packet.transactionId == 0 ||
+        packet.deviceId == 0 || packet.parentMainId == 0)) return false;
+    return hasValidRemovalEnvelope(packet.type, packet.pairingState, packet.role,
+        packet.deviceId, packet.parentMainId, packet.sourceId,
+        packet.destinationId);
 }

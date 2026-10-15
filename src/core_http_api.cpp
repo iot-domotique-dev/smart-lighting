@@ -16,6 +16,7 @@
 namespace {
 constexpr size_t MAX_COMMAND_BODY_BYTES = 64;
 constexpr size_t MAX_PAIRING_BODY_BYTES = 160;
+constexpr size_t MAX_REMOVAL_BODY_BYTES = 64;
 constexpr size_t MAX_AUTHORIZATION_BYTES = 160;
 char responseBuffer[CORE_API_MAX_RESPONSE_BYTES];
 
@@ -60,6 +61,13 @@ enum class PairingRouteKind : uint8_t {
     OPERATION_CREATE,
     OPERATION_STATUS,
     INVALID
+};
+
+enum class RemovalRouteKind : uint8_t { NONE, CREATE, STATUS, INVALID };
+
+struct RemovalRoute {
+    RemovalRouteKind kind;
+    uint32_t id;
 };
 
 struct PairingRoute {
@@ -119,6 +127,34 @@ PairingRoute parsePairingRoute(const char* uri) {
         return {PairingRouteKind::OPERATION_STATUS, id};
     }
     return {PairingRouteKind::INVALID, 0};
+}
+
+RemovalRoute parseRemovalRoute(const char* uri) {
+    if (uri == nullptr) return {RemovalRouteKind::NONE, 0};
+    constexpr char DEVICE_PREFIX[] = "/api/v1/devices/";
+    constexpr char CREATE_SUFFIX[] = "/removal-operations";
+    if (strncmp(uri, DEVICE_PREFIX, sizeof(DEVICE_PREFIX) - 1) == 0) {
+        const char* idStart = uri + sizeof(DEVICE_PREFIX) - 1;
+        const char* suffix = strstr(idStart, CREATE_SUFFIX);
+        if (suffix == nullptr) return {RemovalRouteKind::NONE, 0};
+        uint32_t id = 0;
+        if (!parseId(idStart, suffix, id) ||
+            strcmp(suffix, CREATE_SUFFIX) != 0 || strchr(uri, '?') != nullptr)
+            return {RemovalRouteKind::INVALID, 0};
+        return {RemovalRouteKind::CREATE, id};
+    }
+    constexpr char STATUS_PREFIX[] = "/api/v1/removal-operations/";
+    if (strncmp(uri, STATUS_PREFIX, sizeof(STATUS_PREFIX) - 1) == 0) {
+        const char* idStart = uri + sizeof(STATUS_PREFIX) - 1;
+        uint32_t id = 0;
+        if (strchr(idStart, '/') != nullptr || strchr(idStart, '?') != nullptr ||
+            !parseId(idStart, idStart + strlen(idStart), id))
+            return {RemovalRouteKind::INVALID, 0};
+        return {RemovalRouteKind::STATUS, id};
+    }
+    if (strncmp(uri, "/api/v1/removal-operations", 26) == 0)
+        return {RemovalRouteKind::INVALID, 0};
+    return {RemovalRouteKind::NONE, 0};
 }
 
 void skipJsonWhitespace(const char*& cursor, const char* end) {
@@ -189,6 +225,41 @@ bool parseSessionBody(const char* body, uint16_t& durationSeconds) {
     if (cursor != end || duration < 15 || duration > 180) return false;
     durationSeconds = static_cast<uint16_t>(duration);
     return true;
+}
+
+bool parseRemovalBody(const char* body, uint32_t& operationId) {
+    const char* cursor = body;
+    const char* end = body + strlen(body);
+    skipJsonWhitespace(cursor, end);
+    if (cursor == end || *cursor++ != '{') return false;
+    skipJsonWhitespace(cursor, end);
+    char key[32] = {};
+    if (!parseJsonString(cursor, end, key, sizeof(key)) ||
+        strcmp(key, "operation_id") != 0) return false;
+    skipJsonWhitespace(cursor, end);
+    if (cursor == end || *cursor++ != ':') return false;
+    skipJsonWhitespace(cursor, end);
+    if (!parseJsonUnsigned(cursor, end, operationId) || operationId == 0)
+        return false;
+    skipJsonWhitespace(cursor, end);
+    if (cursor == end || *cursor++ != '}') return false;
+    skipJsonWhitespace(cursor, end);
+    return cursor == end;
+}
+
+const char* removalStateName(CorePairingResultCode result) {
+    switch (result) {
+        case CorePairingResultCode::PROCESSING: return "processing";
+        case CorePairingResultCode::SUCCEEDED: return "succeeded";
+        case CorePairingResultCode::UNCERTAIN: return "uncertain";
+        case CorePairingResultCode::NOT_FOUND: return "not_found";
+        case CorePairingResultCode::FAILED:
+        case CorePairingResultCode::REJECTED:
+        case CorePairingResultCode::BUSY:
+        case CorePairingResultCode::ROUTE_UNAVAILABLE:
+            return "failed";
+        default: return "uncertain";
+    }
 }
 
 bool parsePairOperationBody(const char* body, uint32_t& sessionId,
@@ -392,7 +463,7 @@ const char* commandError(const PendingMessage& pending) {
         return nullptr;
     const int32_t error = pending.message.value2;
     if (error >= static_cast<int32_t>(CoreCommandError::UNKNOWN_DESTINATION) &&
-        error <= static_cast<int32_t>(CoreCommandError::DUPLICATE_ID)) {
+        error <= static_cast<int32_t>(CoreCommandError::REMOVAL_IN_PROGRESS)) {
         return coreCommandErrorName(static_cast<CoreCommandError>(error));
     }
     return "execution_failed";
@@ -457,6 +528,9 @@ esp_err_t handleCommandRequest(CommandApiContext& api, httpd_req_t* request,
                 case CoreCommandError::DUPLICATE_ID:
                     return sendError(request, 503, "id_collision",
                                      "The generated command ID collided; retry shortly.");
+                case CoreCommandError::REMOVAL_IN_PROGRESS:
+                    return sendError(request, 409, "removal_in_progress",
+                                     "The lamp is being removed.");
                 default:
                     return sendError(request, 500, "command_rejected",
                                      "The CORE rejected the command.");
@@ -525,7 +599,235 @@ CoreHttpApi::CoreHttpApi(DeviceRegistry& coreRegistry,
                          const char* commandApiToken)
     : registry(coreRegistry), wifi(wifiTransport), uart(uartTransport),
       commands(commandService), tracker(messageTracker), apiToken(commandApiToken),
-      registryMutex(&coreRegistryMutex), started(false), server(nullptr) {}
+      registryMutex(&coreRegistryMutex), removalOperationId(0),
+      removalTargetId(0), removalMainLocalId(0), removalMainCoreId(0),
+      removalLampLocalId(0), removalLastQueryAt(0),
+      removalResult(CorePairingResultCode::NONE), started(false), server(nullptr) {}
+
+esp_err_t CoreHttpApi::handleRemovalRequest(httpd_req_t* request) {
+    const RemovalRoute route = parseRemovalRoute(request->uri);
+    if (route.kind == RemovalRouteKind::INVALID)
+        return sendError(request, 400, "bad_request", "The removal path or ID is invalid.");
+    if (!coreHttpTokenConfigured(apiToken))
+        return sendError(request, 503, "removal_api_disabled",
+                         "Configure a valid API token to enable device removal.");
+    if (!authorized(request, apiToken))
+        return sendError(request, 401, "unauthorized", "A valid Bearer token is required.");
+
+    if (route.kind == RemovalRouteKind::CREATE) {
+        if (request->method != HTTP_POST)
+            return sendError(request, 405, "method_not_allowed",
+                             "Use POST to request removal.", "POST");
+        if (request->content_len > MAX_REMOVAL_BODY_BYTES)
+            return sendError(request, 413, "payload_too_large",
+                             "The removal request body is too large.");
+        char body[MAX_REMOVAL_BODY_BYTES + 1] = {};
+        uint32_t operationId = 0;
+        if (!parsePairingBody(request, body, sizeof(body)) ||
+            !parseRemovalBody(body, operationId))
+            return sendError(request, 400, "bad_request",
+                "Expected JSON containing a nonzero operation_id.");
+        if (registryMutex == nullptr || *registryMutex == nullptr ||
+            xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(250)) != pdTRUE)
+            return sendError(request, 503, "core_busy", "The CORE is busy; retry shortly.");
+
+        const uint32_t now = millis();
+        bool duplicate = removalOperationId == operationId;
+        if (duplicate && removalTargetId != 0 && removalTargetId != route.id) {
+            (void)xSemaphoreGive(*registryMutex);
+            return sendError(request, 409, "operation_id_conflict",
+                "This operation_id is already associated with another lamp.");
+        }
+        if (duplicate && removalResult == CorePairingResultCode::SUCCEEDED) {
+            const uint32_t targetId = removalTargetId;
+            (void)xSemaphoreGive(*registryMutex);
+            const int length = snprintf(responseBuffer, sizeof(responseBuffer),
+                "{\"operation\":{\"id\":%lu,\"device_id\":%lu,\"state\":\"succeeded\"}}",
+                static_cast<unsigned long>(operationId),
+                static_cast<unsigned long>(targetId));
+            if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer))
+                return sendError(request, 500, "internal_error", "The response could not be serialized.");
+            return sendJson(request, 200, responseBuffer, static_cast<size_t>(length));
+        }
+        if (duplicate && removalResult == CorePairingResultCode::FAILED) {
+            const uint32_t targetId = removalTargetId;
+            (void)xSemaphoreGive(*registryMutex);
+            const int length = snprintf(responseBuffer, sizeof(responseBuffer),
+                "{\"operation\":{\"id\":%lu,\"device_id\":%lu,\"state\":\"failed\"}}",
+                static_cast<unsigned long>(operationId),
+                static_cast<unsigned long>(targetId));
+            if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer))
+                return sendError(request, 500, "internal_error", "The response could not be serialized.");
+            return sendJson(request, 200, responseBuffer, static_cast<size_t>(length));
+        }
+        if (duplicate && removalResult == CorePairingResultCode::NOT_FOUND) {
+            (void)xSemaphoreGive(*registryMutex);
+            return sendJson(request, 200,
+                "{\"operation\":{\"state\":\"not_found\"}}",
+                sizeof("{\"operation\":{\"state\":\"not_found\"}}") - 1);
+        }
+        if (duplicate && removalTargetId == 0) {
+            CoreLinkPacket query = {};
+            query.type = CoreLinkMessageType::PAIRING;
+            query.sequence = static_cast<uint16_t>(operationId);
+            query.pairingAction = CoreLinkPairingAction::QUERY_REMOVAL;
+            query.localId = removalMainLocalId;
+            query.parentId = removalMainCoreId;
+            query.operationId = operationId;
+            removalLastQueryAt = now;
+            (void)xSemaphoreGive(*registryMutex);
+            if (!uart.send(query)) {
+                return sendError(request, 503, "removal_query_uncertain",
+                                 "The existing operation could not be queried.");
+            }
+            return sendJson(request, 202,
+                "{\"operation\":{\"state\":\"uncertain\"}}",
+                sizeof("{\"operation\":{\"state\":\"uncertain\"}}") - 1);
+        }
+        if (!duplicate && removalOperationId != 0 &&
+            (removalResult == CorePairingResultCode::PROCESSING ||
+             removalResult == CorePairingResultCode::UNCERTAIN)) {
+            (void)xSemaphoreGive(*registryMutex);
+            return sendError(request, 409, "removal_in_progress",
+                             "Another lamp removal is still unresolved.");
+        }
+
+        const Device* target = findDeviceById(registry, route.id);
+        const Device* main = nullptr;
+        uint16_t mainCount = 0;
+        (void)findPairingMain(registry, main, mainCount);
+        if (target == nullptr || target->role != DeviceRole::LAMP ||
+            target->localId == 0 || target->parentId == 0 ||
+            main == nullptr || mainCount != 1 ||
+            target->parentId != main->id || main->localId == 0 ||
+            makeCoreModuleId(main->id, target->localId) != target->id) {
+            (void)xSemaphoreGive(*registryMutex);
+            return sendError(request, 404, "unknown_destination",
+                             "The requested lamp was not found.");
+        }
+        if (target->status != DeviceStatus::ONLINE ||
+            main->status != DeviceStatus::ONLINE) {
+            (void)xSemaphoreGive(*registryMutex);
+            return sendError(request, 409, "offline",
+                             "The lamp or its MAIN module is offline.");
+        }
+        if (!duplicate && commands.hasUnresolvedPowerCommand(target->id)) {
+            (void)xSemaphoreGive(*registryMutex);
+            return sendError(request, 409, "command_unresolved",
+                "A power command is pending or its execution is unknown for this lamp.");
+        }
+        if (duplicate && removalTargetId == 0) {
+            removalTargetId = target->id;
+            removalMainLocalId = main->localId;
+            removalMainCoreId = main->id;
+            removalLampLocalId = target->localId;
+        } else if (!duplicate) {
+            removalOperationId = operationId;
+            removalTargetId = target->id;
+            removalMainLocalId = main->localId;
+            removalMainCoreId = main->id;
+            removalLampLocalId = target->localId;
+            removalResult = CorePairingResultCode::PROCESSING;
+            removalLastQueryAt = 0;
+        }
+
+        CoreLinkPacket command = {};
+        command.type = CoreLinkMessageType::PAIRING;
+        command.sequence = static_cast<uint16_t>(operationId);
+        command.pairingAction = CoreLinkPairingAction::REMOVE_DEVICE;
+        command.localId = main->localId;
+        command.parentId = main->id;
+        command.operationId = operationId;
+        command.deviceId = target->localId;
+        command.coreId = target->id;
+        (void)xSemaphoreGive(*registryMutex);
+
+        if (!uart.send(command)) {
+            if (registryMutex != nullptr && *registryMutex != nullptr &&
+                xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
+                if (removalOperationId == operationId)
+                    removalResult = CorePairingResultCode::UNCERTAIN;
+                (void)xSemaphoreGive(*registryMutex);
+            }
+            const int length = snprintf(responseBuffer, sizeof(responseBuffer),
+                "{\"operation\":{\"id\":%lu,\"device_id\":%lu,\"state\":\"uncertain\"}}",
+                static_cast<unsigned long>(operationId),
+                static_cast<unsigned long>(route.id));
+            if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer))
+                return sendError(request, 503, "removal_transport_uncertain",
+                                 "The request could not be confirmed.");
+            return sendJson(request, 503, responseBuffer, static_cast<size_t>(length));
+        }
+        const int length = snprintf(responseBuffer, sizeof(responseBuffer),
+            "{\"operation\":{\"id\":%lu,\"device_id\":%lu,\"state\":\"processing\"}}",
+            static_cast<unsigned long>(operationId),
+            static_cast<unsigned long>(route.id));
+        if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer))
+            return sendError(request, 500, "internal_error", "The response could not be serialized.");
+        return sendJson(request, 202, responseBuffer, static_cast<size_t>(length));
+    }
+
+    if (route.kind == RemovalRouteKind::STATUS) {
+        if (request->method != HTTP_GET)
+            return sendError(request, 405, "method_not_allowed",
+                             "Use GET to read a removal operation.", "GET");
+        if (registryMutex == nullptr || *registryMutex == nullptr ||
+            xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(250)) != pdTRUE)
+            return sendError(request, 503, "core_busy", "The CORE is busy; retry shortly.");
+        const uint32_t now = millis();
+        bool query = false;
+        CoreLinkPacket command = {};
+        if (removalOperationId != route.id) {
+            const Device* main = nullptr;
+            uint16_t mainCount = 0;
+            (void)findPairingMain(registry, main, mainCount);
+            if (main == nullptr || mainCount != 1 || main->localId == 0) {
+                (void)xSemaphoreGive(*registryMutex);
+                return sendError(request, 503, "main_unavailable",
+                                 "The MAIN is not available for operation reconciliation.");
+            }
+            removalOperationId = route.id;
+            removalTargetId = 0;
+            removalMainLocalId = main->localId;
+            removalMainCoreId = main->id;
+            removalLampLocalId = 0;
+            removalResult = CorePairingResultCode::UNCERTAIN;
+            removalLastQueryAt = 0;
+        }
+        if ((removalResult == CorePairingResultCode::PROCESSING ||
+             removalResult == CorePairingResultCode::UNCERTAIN) &&
+            (removalLastQueryAt == 0 || now - removalLastQueryAt >= 2000)) {
+            command.type = CoreLinkMessageType::PAIRING;
+            command.sequence = static_cast<uint16_t>(route.id);
+            command.pairingAction = CoreLinkPairingAction::QUERY_REMOVAL;
+            command.localId = removalMainLocalId;
+            command.parentId = removalMainCoreId;
+            command.operationId = route.id;
+            removalLastQueryAt = now;
+            query = true;
+        }
+        const uint32_t targetId = removalTargetId;
+        CorePairingResultCode result = removalResult;
+        (void)xSemaphoreGive(*registryMutex);
+        if (query && !uart.send(command)) {
+            if (registryMutex != nullptr && *registryMutex != nullptr &&
+                xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                removalResult = CorePairingResultCode::UNCERTAIN;
+                (void)xSemaphoreGive(*registryMutex);
+            }
+            result = CorePairingResultCode::UNCERTAIN;
+        }
+        const int length = snprintf(responseBuffer, sizeof(responseBuffer),
+            "{\"operation\":{\"id\":%lu,\"device_id\":%lu,\"state\":\"%s\",\"result_code\":\"%s\"}}",
+            static_cast<unsigned long>(route.id),
+            static_cast<unsigned long>(targetId), removalStateName(result),
+            corePairingResultCodeName(result));
+        if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer))
+            return sendError(request, 500, "internal_error", "The response could not be serialized.");
+        return sendJson(request, 200, responseBuffer, static_cast<size_t>(length));
+    }
+    return sendError(request, 404, "not_found", "The removal resource was not found.");
+}
 
 esp_err_t CoreHttpApi::handlePairingRequest(httpd_req_t* request) {
     const PairingRoute route = parsePairingRoute(request->uri);
@@ -837,6 +1139,37 @@ void CoreHttpApi::handlePairingPacket(const CoreLinkPacket& packet) {
         xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
     const uint32_t now = millis();
     switch (packet.pairingAction) {
+        case CoreLinkPairingAction::REMOVAL_RESULT: {
+            if (packet.operationId != removalOperationId ||
+                packet.localId != removalMainLocalId ||
+                packet.parentId != removalMainCoreId) break;
+            if (packet.pairingResult != CorePairingResultCode::NOT_FOUND) {
+                const bool identityUnavailable =
+                    packet.pairingResult == CorePairingResultCode::UNCERTAIN &&
+                    packet.deviceId == 0 && packet.coreId == 0;
+                if (!identityUnavailable && (packet.deviceId == 0 || packet.coreId == 0 ||
+                    makeCoreModuleId(packet.parentId, packet.deviceId) != packet.coreId ||
+                    (removalTargetId != 0 && removalTargetId != packet.coreId) ||
+                    (removalLampLocalId != 0 && removalLampLocalId != packet.deviceId)))
+                    break;
+                Device* target = identityUnavailable ? nullptr :
+                    findDeviceById(registry, packet.coreId);
+                if (target != nullptr &&
+                    (target->role != DeviceRole::LAMP ||
+                     target->parentId != packet.parentId ||
+                     target->localId != packet.deviceId)) break;
+                if (!identityUnavailable) {
+                    removalTargetId = packet.coreId;
+                    removalLampLocalId = packet.deviceId;
+                }
+            }
+            removalResult = packet.pairingResult;
+            if (packet.pairingResult == CorePairingResultCode::SUCCEEDED &&
+                removalTargetId != 0) {
+                (void)unregisterDevice(registry, removalTargetId);
+            }
+            break;
+        }
         case CoreLinkPairingAction::CANDIDATE:
             (void)pairing.addCandidate(packet.sessionId, packet.localId,
                 packet.hardwareId, packet.capabilities, now);
@@ -912,6 +1245,9 @@ bool CoreHttpApi::isReady() const {
 esp_err_t CoreHttpApi::handleRequest(httpd_req_t* request) {
     if (request == nullptr || request->user_ctx == nullptr) return ESP_FAIL;
     CoreHttpApi* api = static_cast<CoreHttpApi*>(request->user_ctx);
+    const RemovalRoute removalRoute = parseRemovalRoute(request->uri);
+    if (removalRoute.kind != RemovalRouteKind::NONE)
+        return api->handleRemovalRequest(request);
     const PairingRoute pairingRoute = parsePairingRoute(request->uri);
     if (pairingRoute.kind != PairingRouteKind::NONE)
         return api->handlePairingRequest(request);
@@ -983,7 +1319,10 @@ CoreHttpApi::CoreHttpApi(DeviceRegistry& coreRegistry,
                          const char* commandApiToken)
     : registry(coreRegistry), wifi(wifiTransport), uart(uartTransport),
       commands(commandService), tracker(messageTracker), apiToken(commandApiToken),
-      registryMutex(&coreRegistryMutex), started(false) {}
+      registryMutex(&coreRegistryMutex), removalOperationId(0),
+      removalTargetId(0), removalMainLocalId(0), removalMainCoreId(0),
+      removalLampLocalId(0), removalLastQueryAt(0),
+      removalResult(CorePairingResultCode::NONE), started(false) {}
 
 bool CoreHttpApi::begin() { return false; }
 bool CoreHttpApi::isReady() const { return started; }

@@ -123,6 +123,17 @@ bool CoreCommandService::handleReply(const Message& message) {
     return true;
 }
 
+bool CoreCommandService::hasUnresolvedPowerCommand(uint32_t destinationId) const {
+    const Device* lamp = findDeviceById(registry, destinationId);
+    if (lamp == nullptr || lamp->powerExecutionUnknown) return true;
+    for (uint8_t index = 0; index < tracker.count; ++index) {
+        const PendingMessage& pending = tracker.messages[index];
+        if (pending.waitingForAck && isTrackedPowerCommand(pending.message) &&
+            pending.message.destinationId == destinationId) return true;
+    }
+    return false;
+}
+
 void CoreCommandService::poll() {
     (void)updateMessageTimeouts(tracker, link);
     for (uint8_t index = 0; index < tracker.count; ++index) {
@@ -196,6 +207,8 @@ bool MainCommandRelay::handleMessage(const Message& message) {
              lamp->identity.parentMainId != mainLocalId ||
              message.destinationId != makeCoreModuleId(mainCoreId, lamp->device.id))
         error = CoreCommandError::INVALID_ROUTE;
+    else if (lamp->identity.removalPending)
+        error = CoreCommandError::REMOVAL_IN_PROGRESS;
     else if (lamp->device.status != DeviceStatus::ONLINE) error = CoreCommandError::OFFLINE;
     if (error == CoreCommandError::NONE) {
         // Acceptance is non-terminal. Each retry reaches the LAMP cache again.

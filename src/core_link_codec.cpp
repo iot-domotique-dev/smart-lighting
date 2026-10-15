@@ -91,6 +91,19 @@ bool validPairingPacket(const CoreLinkPacket& packet) {
                    packet.pairingResult <= CorePairingResultCode::ROUTE_UNAVAILABLE;
         case CoreLinkPairingAction::CANDIDATE_LIMIT:
             return packet.sessionId != 0;
+        case CoreLinkPairingAction::REMOVE_DEVICE:
+            return packet.operationId != 0 && packet.parentId != 0 &&
+                   packet.deviceId != 0 && packet.coreId != 0;
+        case CoreLinkPairingAction::QUERY_REMOVAL:
+            return packet.operationId != 0 && packet.parentId != 0;
+        case CoreLinkPairingAction::REMOVAL_RESULT:
+            return packet.operationId != 0 && packet.parentId != 0 &&
+                   packet.pairingResult > CorePairingResultCode::NONE &&
+                   packet.pairingResult <= CorePairingResultCode::ROUTE_UNAVAILABLE &&
+                   (packet.pairingResult == CorePairingResultCode::NOT_FOUND ||
+                    (packet.pairingResult == CorePairingResultCode::UNCERTAIN &&
+                     packet.deviceId == 0 && packet.coreId == 0) ||
+                    (packet.deviceId != 0 && packet.coreId != 0));
         case CoreLinkPairingAction::NONE:
             return false;
     }
@@ -198,6 +211,9 @@ bool appendPairingPacket(const CoreLinkPacket& packet, uint8_t* output,
         case CoreLinkPairingAction::SESSION_RESULT: fixedBytes = 5; break;
         case CoreLinkPairingAction::OPERATION_RESULT: fixedBytes = 13; break;
         case CoreLinkPairingAction::CANDIDATE_LIMIT: fixedBytes = 4; break;
+        case CoreLinkPairingAction::REMOVE_DEVICE: fixedBytes = 16; break;
+        case CoreLinkPairingAction::QUERY_REMOVAL: fixedBytes = 8; break;
+        case CoreLinkPairingAction::REMOVAL_RESULT: fixedBytes = 17; break;
         case CoreLinkPairingAction::NONE: return false;
     }
     if (capacity - offset - 5 < fixedBytes) return false;
@@ -233,6 +249,23 @@ bool appendPairingPacket(const CoreLinkPacket& packet, uint8_t* output,
         case CoreLinkPairingAction::CANDIDATE_LIMIT:
             writeU32(output, offset, packet.sessionId);
             return offset <= capacity;
+        case CoreLinkPairingAction::REMOVE_DEVICE:
+            writeU32(output, offset, packet.operationId);
+            writeU32(output, offset, packet.parentId);
+            writeU32(output, offset, packet.deviceId);
+            writeU32(output, offset, packet.coreId);
+            return offset <= capacity;
+        case CoreLinkPairingAction::QUERY_REMOVAL:
+            writeU32(output, offset, packet.operationId);
+            writeU32(output, offset, packet.parentId);
+            return offset <= capacity;
+        case CoreLinkPairingAction::REMOVAL_RESULT:
+            writeU32(output, offset, packet.operationId);
+            writeU32(output, offset, packet.parentId);
+            writeU32(output, offset, packet.deviceId);
+            writeU32(output, offset, packet.coreId);
+            output[offset++] = static_cast<uint8_t>(packet.pairingResult);
+            return appendName(packet.hardwareId, output, capacity, offset);
         case CoreLinkPairingAction::NONE:
             return false;
     }
@@ -243,7 +276,7 @@ bool readPairingPacket(const uint8_t* input, size_t length, size_t& offset,
                        CoreLinkPacket& packet) {
     if (offset >= length) return false;
     const uint8_t action = input[offset++];
-    if (action == 0 || action > static_cast<uint8_t>(CoreLinkPairingAction::CANDIDATE_LIMIT) ||
+    if (action == 0 || action > static_cast<uint8_t>(CoreLinkPairingAction::REMOVAL_RESULT) ||
         !readU32(input, length, offset, packet.localId)) return false;
     packet.type = CoreLinkMessageType::PAIRING;
     packet.pairingAction = static_cast<CoreLinkPairingAction>(action);
@@ -281,6 +314,23 @@ bool readPairingPacket(const uint8_t* input, size_t length, size_t& offset,
                             sizeof(packet.hardwareId));
         case CoreLinkPairingAction::CANDIDATE_LIMIT:
             return readU32(input, length, offset, packet.sessionId);
+        case CoreLinkPairingAction::REMOVE_DEVICE:
+            return readU32(input, length, offset, packet.operationId) &&
+                   readU32(input, length, offset, packet.parentId) &&
+                   readU32(input, length, offset, packet.deviceId) &&
+                   readU32(input, length, offset, packet.coreId);
+        case CoreLinkPairingAction::QUERY_REMOVAL:
+            return readU32(input, length, offset, packet.operationId) &&
+                   readU32(input, length, offset, packet.parentId);
+        case CoreLinkPairingAction::REMOVAL_RESULT:
+            if (!readU32(input, length, offset, packet.operationId) ||
+                !readU32(input, length, offset, packet.parentId) ||
+                !readU32(input, length, offset, packet.deviceId) ||
+                !readU32(input, length, offset, packet.coreId) ||
+                offset >= length || !isValidPairingResult(input[offset])) return false;
+            packet.pairingResult = static_cast<CorePairingResultCode>(input[offset++]);
+            return readName(input, length, offset, packet.hardwareId,
+                            sizeof(packet.hardwareId));
         case CoreLinkPairingAction::NONE:
             return false;
     }

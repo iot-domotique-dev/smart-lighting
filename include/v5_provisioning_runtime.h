@@ -28,6 +28,8 @@ private:
     uint32_t activePairingOperationId;
     uint32_t activePairingOperationSessionId;
     uint32_t pairingOperationStartedAt;
+    uint32_t nextRemovalRetryAt;
+    uint32_t lastRemovalContactAt;
     char activePairingHardwareId[LAMP_HARDWARE_ID_LENGTH];
 
     static bool handleMessage(
@@ -44,6 +46,12 @@ private:
                                    uint32_t deviceId,
                                    const char* hardwareId);
     void clearPairingOperation();
+    bool handleCoreRemovalControl(const Message& message);
+    void sendRemovalResult(uint32_t operationId,
+                           CorePairingResultCode result,
+                           const MainProvisioningReservationState& state);
+    void announceAcceptedLamp(const ProvisioningPacket& lamp);
+    void processRemovalEvidence(const ProvisioningPacket& packet);
     bool sendPacket(const ProvisioningPacket& packet, uint32_t sourceId,
                     uint32_t destinationId);
     void restoreLocalLamp();

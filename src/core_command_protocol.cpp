@@ -83,6 +83,7 @@ const char* coreCommandErrorName(CoreCommandError error) {
         case CoreCommandError::DEDUP_FULL: return "dedup_full";
         case CoreCommandError::TRACKER_FULL: return "tracker_full";
         case CoreCommandError::DUPLICATE_ID: return "duplicate_id";
+        case CoreCommandError::REMOVAL_IN_PROGRESS: return "removal_in_progress";
     }
     return "execution_failed";
 }
