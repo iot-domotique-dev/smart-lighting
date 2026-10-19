@@ -13,6 +13,7 @@
 #include "message_deduplicator.h"
 #include "message_router.h"
 #include "message_id_generator.h"
+#include "lamp_hardware.h"
 #include "zigbee_message_codec.h"
 #include "zigbee_route_table.h"
 
@@ -310,6 +311,41 @@ public:
         TEST_ASSERT_EQUAL_UINT32(id, messageId);
     }
 
+    void enableBrightnessFor(uint32_t destinationId) {
+        Device* coreLamp = findDeviceById(registry, destinationId);
+        TEST_ASSERT_NOT_NULL(coreLamp);
+        coreLamp->capabilities = DEVICE_CAP_POWER | DEVICE_CAP_BRIGHTNESS;
+        Lamp* mainLamp = findLamp(mainLamps, coreLamp->localId);
+        TEST_ASSERT_NOT_NULL(mainLamp);
+        mainLamp->device.capabilities = coreLamp->capabilities;
+        LampRegistry& endpoint = coreLamp->localId == lampLocal
+            ? lampLamps : secondLampLamps;
+        Lamp* localLamp = findLamp(endpoint, coreLamp->localId);
+        TEST_ASSERT_NOT_NULL(localLamp);
+        localLamp->device.capabilities = coreLamp->capabilities;
+        configureLampHardwareSimulation(true);
+    }
+
+    void submitBrightnessTo(uint32_t destinationId, int32_t percent,
+                            uint32_t id) {
+        uint32_t messageId = 0;
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreCommandError::NONE),
+            static_cast<int>(core.submitBrightness(destinationId, percent,
+                                                     messageId, id)));
+        TEST_ASSERT_EQUAL_UINT32(id, messageId);
+    }
+
+    void deliverToMainAndReceipt() {
+        while (wifiIndex < wifiUart.sent.size())
+            TEST_ASSERT_TRUE(bridge.handleFromCore(wifiUart.sent[wifiIndex++].message));
+        while (bridgeIndex < bridgeRadio.sent.size()) {
+            const Envelope envelope = bridgeRadio.sent[bridgeIndex++];
+            TEST_ASSERT_TRUE(relay.handleMessage(envelope.message));
+        }
+        consumeMainOutput();
+        consumeUartReplies();
+    }
+
     PendingMessage* pending(uint32_t id = FIRST_COMMAND) {
         return findPendingMessage(coreTracker, id);
     }
@@ -472,9 +508,10 @@ void assertSameCommand(const Message& expected, const Message& actual) {
 void setUp() {
     fakeNow = 1000;
     Serial.powerExecutionCount = 0;
+    configureLampHardwareSimulation(false);
     (void)consumeDropNextCoreExecutionAck();
 }
-void tearDown() {}
+void tearDown() { configureLampHardwareSimulation(false); }
 
 void test_set_power_traverses_uart_main_lamp_and_execution_ack_returns() {
     Network network;
@@ -769,7 +806,7 @@ void test_expired_power_command_preserves_old_value_as_stale() {
                           static_cast<int>(lamp->lastConfirmedPowerStatus));
 }
 
-void test_overlapping_same_lamp_commands_keep_history_stale_on_reordered_acks() {
+void test_one_output_command_in_flight_per_lamp_across_power_and_brightness() {
     Network network;
     network.submit(true, FIRST_COMMAND + 200);
     network.pump();
@@ -778,49 +815,221 @@ void test_overlapping_same_lamp_commands_keep_history_stale_on_reordered_acks() 
     TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::ON),
                           static_cast<int>(lamp->lastConfirmedPower));
 
+    network.enableBrightnessFor(network.lampId);
     const uint32_t olderId = FIRST_COMMAND + 201;
-    const uint32_t newerId = FIRST_COMMAND + 202;
     network.submit(false, olderId);
-    network.submit(true, newerId);
+    uint32_t rejectedId = 0;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreCommandError::COMMAND_IN_PROGRESS),
+        static_cast<int>(network.core.submitBrightness(network.lampId, 50,
+            rejectedId, FIRST_COMMAND + 202)));
+    TEST_ASSERT_EQUAL_UINT32(0, rejectedId);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::ON),
                           static_cast<int>(lamp->lastConfirmedPower));
-    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::STALE),
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::CONFIRMED),
                           static_cast<int>(lamp->lastConfirmedPowerStatus));
 
-    network.dropAllFinalReplies = true;
     network.pump();
-    TEST_ASSERT_EQUAL_UINT32(3, Serial.powerExecutionCount);
-    Message olderAck = {};
-    Message newerAck = {};
-    bool foundOlder = false;
-    bool foundNewer = false;
-    for (const Envelope& envelope : network.mainRadio.sent) {
-        const Message& reply = envelope.message;
-        if (reply.type != MessageType::ACK ||
-            reply.executionStatus != ExecutionStatus::EXECUTED) continue;
-        const uint32_t id = static_cast<uint32_t>(reply.value2);
-        if (id == olderId) { olderAck = reply; foundOlder = true; }
-        if (id == newerId) { newerAck = reply; foundNewer = true; }
-    }
-    TEST_ASSERT_TRUE(foundOlder);
-    TEST_ASSERT_TRUE(foundNewer);
-
-    network.dropAllFinalReplies = false;
-    network.deliverReply(newerAck);
-    network.deliverReply(olderAck);
-    network.assertExecuted(newerId);
-    network.assertExecuted(olderId);
-    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::ON),
-                          static_cast<int>(lamp->lastConfirmedPower));
-    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::STALE),
-                          static_cast<int>(lamp->lastConfirmedPowerStatus));
-
-    network.submit(false, FIRST_COMMAND + 203);
-    network.pump();
+    TEST_ASSERT_EQUAL_UINT32(2, Serial.powerExecutionCount);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::OFF),
                           static_cast<int>(lamp->lastConfirmedPower));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::CONFIRMED),
                           static_cast<int>(lamp->lastConfirmedPowerStatus));
+
+    network.submitBrightnessTo(network.lampId, 40, FIRST_COMMAND + 203);
+    rejectedId = 0;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreCommandError::COMMAND_IN_PROGRESS),
+        static_cast<int>(network.core.submitPower(network.lampId, true,
+            rejectedId, FIRST_COMMAND + 204)));
+    TEST_ASSERT_EQUAL_UINT32(0, rejectedId);
+    network.pump();
+    network.assertExecuted(FIRST_COMMAND + 203);
+}
+
+void test_brightness_values_traverse_full_path_and_update_only_after_executed_ack() {
+    Network network;
+    network.enableBrightnessFor(network.lampId);
+    Device* coreLamp = findDeviceById(network.registry, network.lampId);
+    Lamp* localLamp = findLamp(network.lampLamps, network.lampLocal);
+    TEST_ASSERT_NOT_NULL(coreLamp);
+    TEST_ASSERT_NOT_NULL(localLamp);
+
+    const uint8_t values[] = {0, 1, 50, 100};
+    uint32_t id = FIRST_COMMAND + 300;
+    for (uint8_t value : values) {
+        const bool localPowerBefore = localLamp->state.power;
+        const uint8_t localBrightnessBefore = localLamp->state.brightness;
+        const uint8_t coreBrightnessBefore = coreLamp->lastConfirmedBrightness;
+        const LastConfirmedBrightnessStatus coreBrightnessStatusBefore =
+            coreLamp->lastConfirmedBrightnessStatus;
+        network.submitBrightnessTo(network.lampId, value, id);
+        network.deliverToMainAndReceipt();
+        TEST_ASSERT_TRUE(network.pending(id)->accepted);
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(coreBrightnessStatusBefore),
+            static_cast<int>(coreLamp->lastConfirmedBrightnessStatus));
+        TEST_ASSERT_EQUAL_UINT8(coreBrightnessBefore,
+                                coreLamp->lastConfirmedBrightness);
+        TEST_ASSERT_EQUAL_UINT8(localBrightnessBefore,
+                                localLamp->state.brightness);
+        TEST_ASSERT_EQUAL(localPowerBefore, localLamp->state.power);
+
+        network.pump();
+        network.assertExecuted(id);
+        TEST_ASSERT_EQUAL_UINT8(value, localLamp->state.brightness);
+        TEST_ASSERT_EQUAL_UINT8(value, simulatedLampHardwareOutput());
+        TEST_ASSERT_EQUAL_INT(value == 0 ? static_cast<int>(LastConfirmedPower::OFF)
+                                         : static_cast<int>(LastConfirmedPower::ON),
+                              static_cast<int>(coreLamp->lastConfirmedPower));
+        TEST_ASSERT_EQUAL_UINT8(value, coreLamp->lastConfirmedBrightness);
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedBrightnessStatus::CONFIRMED),
+            static_cast<int>(coreLamp->lastConfirmedBrightnessStatus));
+        ++id;
+    }
+}
+
+void test_brightness_capability_range_invalid_ack_retry_and_timeout() {
+    Network unsupported;
+    uint32_t id = 0;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreCommandError::UNSUPPORTED_CAPABILITY),
+        static_cast<int>(unsupported.core.submitBrightness(
+            unsupported.lampId, 50, id, FIRST_COMMAND + 400)));
+    TEST_ASSERT_EQUAL_UINT32(0, id);
+    TEST_ASSERT_EQUAL_UINT(0, unsupported.wifiUart.sent.size());
+
+    Network network;
+    network.enableBrightnessFor(network.lampId);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreCommandError::INVALID_COMMAND),
+        static_cast<int>(network.core.submitBrightness(network.lampId, -1, id)));
+    TEST_ASSERT_EQUAL_UINT32(0, id);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreCommandError::INVALID_COMMAND),
+        static_cast<int>(network.core.submitBrightness(network.lampId, 101, id)));
+
+    const uint32_t firstId = FIRST_COMMAND + 401;
+    network.submitBrightnessTo(network.lampId, 50, firstId);
+    Message wrongAck = makeCoreCommandAck(network.wifiUart.sent[0].message,
+        network.lampId, ExecutionStatus::EXECUTED);
+    ++wrongAck.provisioningDeviceId;
+    network.deliverReply(wrongAck);
+    Device* lamp = findDeviceById(network.registry, network.lampId);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedBrightnessStatus::UNKNOWN),
+        static_cast<int>(lamp->lastConfirmedBrightnessStatus));
+    network.pump();
+    network.assertExecuted(firstId);
+    TEST_ASSERT_EQUAL_UINT8(50, lamp->lastConfirmedBrightness);
+    TEST_ASSERT_TRUE(lamp->lastConfirmedNonzeroBrightnessKnown);
+
+    const uint32_t retryId = FIRST_COMMAND + 402;
+    network.submitBrightnessTo(network.lampId, 65, retryId);
+    network.pump(true); // LAMP executes once; its final ACK is lost.
+    TEST_ASSERT_EQUAL_UINT8(65, findLamp(network.lampLamps,
+                                         network.lampLocal)->state.brightness);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedBrightnessStatus::CONFIRMED),
+        static_cast<int>(lamp->lastConfirmedBrightnessStatus));
+    network.retry();
+    network.assertExecuted(retryId);
+    TEST_ASSERT_EQUAL_UINT8(65, lamp->lastConfirmedBrightness);
+
+    const uint32_t timeoutId = FIRST_COMMAND + 403;
+    network.dropAllCommands = true;
+    network.submitBrightnessTo(network.lampId, 75, timeoutId);
+    network.pump();
+    network.retry();
+    network.retry();
+    network.retry();
+    TEST_ASSERT_TRUE(network.pending(timeoutId)->timedOut);
+    TEST_ASSERT_EQUAL_UINT8(65, lamp->lastConfirmedBrightness);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedBrightnessStatus::STALE),
+        static_cast<int>(lamp->lastConfirmedBrightnessStatus));
+    TEST_ASSERT_TRUE(lamp->brightnessExecutionUnknown);
+    TEST_ASSERT_TRUE(lamp->powerExecutionUnknown);
+}
+
+void test_pwm_driver_failure_returns_failed_ack_without_confirming_new_level() {
+    Network network;
+    network.enableBrightnessFor(network.lampId);
+    Device* coreLamp = findDeviceById(network.registry, network.lampId);
+    Lamp* localLamp = findLamp(network.lampLamps, network.lampLocal);
+    TEST_ASSERT_NOT_NULL(coreLamp);
+    TEST_ASSERT_NOT_NULL(localLamp);
+
+    const uint32_t successfulId = FIRST_COMMAND + 404;
+    network.submitBrightnessTo(network.lampId, 40, successfulId);
+    network.pump();
+    network.assertExecuted(successfulId);
+    TEST_ASSERT_EQUAL_UINT8(40, coreLamp->lastConfirmedBrightness);
+
+    const uint32_t failedId = FIRST_COMMAND + 405;
+    network.submitBrightnessTo(network.lampId, 65, failedId);
+    network.deliverToMainAndReceipt();
+    failNextLampHardwareWrite();
+    network.pump();
+
+    PendingMessage* failed = network.pending(failedId);
+    TEST_ASSERT_NOT_NULL(failed);
+    TEST_ASSERT_TRUE(failed->completed);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ExecutionStatus::FAILED),
+        static_cast<int>(failed->message.executionStatus));
+    TEST_ASSERT_EQUAL_INT32(static_cast<int32_t>(ExecutionStatus::FAILED),
+                            failed->message.value2);
+    TEST_ASSERT_EQUAL_UINT8(40, localLamp->state.brightness);
+    TEST_ASSERT_EQUAL_UINT8(40, simulatedLampHardwareOutput());
+    TEST_ASSERT_EQUAL_UINT8(40, coreLamp->lastConfirmedBrightness);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedBrightnessStatus::CONFIRMED),
+        static_cast<int>(coreLamp->lastConfirmedBrightnessStatus));
+}
+
+void test_two_lamps_keep_brightness_and_command_ack_state_independent() {
+    Network network(LAMP_LOCAL, true, true, 11);
+    network.enableBrightnessFor(network.lampId);
+    network.enableBrightnessFor(network.secondLampId);
+    const uint32_t idA = FIRST_COMMAND + 410;
+    const uint32_t idB = FIRST_COMMAND + 411;
+    network.submitBrightnessTo(network.lampId, 20, idA);
+    network.submitBrightnessTo(network.secondLampId, 80, idB);
+    network.dropAllFinalReplies = true;
+    network.pump();
+
+    Device* stateA = findDeviceById(network.registry, network.lampId);
+    Device* stateB = findDeviceById(network.registry, network.secondLampId);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedBrightnessStatus::UNKNOWN),
+        static_cast<int>(stateA->lastConfirmedBrightnessStatus));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedBrightnessStatus::UNKNOWN),
+        static_cast<int>(stateB->lastConfirmedBrightnessStatus));
+    TEST_ASSERT_EQUAL_UINT8(20, findLamp(network.lampLamps,
+                                         network.lampLocal)->state.brightness);
+    TEST_ASSERT_EQUAL_UINT8(80, findLamp(network.secondLampLamps,
+                                         network.secondLampLocal)->state.brightness);
+
+    Message ackA = {}, ackB = {};
+    bool foundA = false, foundB = false;
+    for (const Envelope& envelope : network.mainRadio.sent) {
+        const Message& ack = envelope.message;
+        if (ack.type != MessageType::ACK ||
+            ack.executionStatus != ExecutionStatus::EXECUTED) continue;
+        if (static_cast<uint32_t>(ack.value2) == idA) { ackA = ack; foundA = true; }
+        if (static_cast<uint32_t>(ack.value2) == idB) { ackB = ack; foundB = true; }
+    }
+    TEST_ASSERT_TRUE(foundA);
+    TEST_ASSERT_TRUE(foundB);
+    const Message commandB = network.wifiUart.sent[1].message;
+    Message crossLampAck = makeCoreCommandAck(commandB,
+        network.secondLampId, ExecutionStatus::EXECUTED);
+    crossLampAck.value2 = static_cast<int32_t>(idA);
+    network.dropAllFinalReplies = false;
+    network.deliverReply(crossLampAck);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedBrightnessStatus::UNKNOWN),
+        static_cast<int>(stateA->lastConfirmedBrightnessStatus));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedBrightnessStatus::UNKNOWN),
+        static_cast<int>(stateB->lastConfirmedBrightnessStatus));
+    network.deliverReply(ackB);
+    TEST_ASSERT_EQUAL_UINT8(80, stateB->lastConfirmedBrightness);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedBrightnessStatus::UNKNOWN),
+        static_cast<int>(stateA->lastConfirmedBrightnessStatus));
+    network.deliverReply(ackA);
+    TEST_ASSERT_EQUAL_UINT8(20, stateA->lastConfirmedBrightness);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedBrightnessStatus::CONFIRMED),
+        static_cast<int>(stateA->lastConfirmedBrightnessStatus));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedBrightnessStatus::CONFIRMED),
+        static_cast<int>(stateB->lastConfirmedBrightnessStatus));
 }
 
 void test_two_lamps_route_power_and_correlate_retries_independently() {
@@ -1111,21 +1320,32 @@ void test_uart_and_radio_transport_failures_never_report_execution() {
 void test_tracker_capacity_refuses_new_command_without_sending_it() {
     Network network;
     for (unsigned i = 0; i < MAX_PENDING_MESSAGES; ++i) {
-        network.submit(true, FIRST_COMMAND + i);
+        Message unrelated = {};
+        unrelated.id = FIRST_COMMAND + 1000 + i;
+        unrelated.sourceId = CORE_LOGICAL_ID;
+        unrelated.destinationId = network.lampId + 100 + i;
+        unrelated.type = MessageType::COMMAND;
+        unrelated.commandType = static_cast<int32_t>(ActionType::SET_LAMP_POWER);
+        unrelated.parentMainId = network.mainId;
+        unrelated.provisioningDeviceId = LAMP_LOCAL + 100 + i;
+        unrelated.value = 1;
+        TEST_ASSERT_TRUE(trackMessage(network.coreTracker, unrelated));
     }
     uint32_t id = 123;
     TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreCommandError::TRACKER_FULL),
         static_cast<int>(network.core.submitPower(network.lampId, false,
             id, FIRST_COMMAND + MAX_PENDING_MESSAGES)));
     TEST_ASSERT_EQUAL_UINT32(0, id);
-    TEST_ASSERT_EQUAL_UINT(MAX_PENDING_MESSAGES, network.wifiUart.sent.size());
+    TEST_ASSERT_EQUAL_UINT(0, network.wifiUart.sent.size());
 }
 
 void test_full_dedup_cache_protects_retry_and_refuses_execution_until_expiry() {
     Network network;
     for (unsigned i = 0; i < MAX_PROCESSED_MESSAGES; ++i) {
         network.submit(true, FIRST_COMMAND + i);
-        network.pump(i == 0); // Preserve one waiting command among completed ones.
+        network.pump(i == 0); // First execution is confirmed by its retry.
+        if (i == 0) network.retry();
+        network.assertExecuted(FIRST_COMMAND + i);
     }
     TEST_ASSERT_EQUAL_UINT32(MAX_PROCESSED_MESSAGES, Serial.powerExecutionCount);
     TEST_ASSERT_NOT_NULL(findProcessedMessage(network.lampDedup,
@@ -1136,7 +1356,7 @@ void test_full_dedup_cache_protects_retry_and_refuses_execution_until_expiry() {
     network.assertFailure(CoreCommandError::DEDUP_FULL, excessId);
     TEST_ASSERT_EQUAL_UINT32(MAX_PROCESSED_MESSAGES, Serial.powerExecutionCount);
     network.retry();
-    network.assertExecuted();
+    network.assertFailure(CoreCommandError::DEDUP_FULL, excessId);
     TEST_ASSERT_EQUAL_UINT32(MAX_PROCESSED_MESSAGES, Serial.powerExecutionCount);
     fakeNow = 61001;
     network.submit(false, excessId + 1);
@@ -1152,6 +1372,8 @@ void test_dedup_protection_survives_millis_wraparound() {
     for (unsigned i = 0; i < MAX_PROCESSED_MESSAGES; ++i) {
         network.submit(true, FIRST_COMMAND + i);
         network.pump(i == 0);
+        if (i == 0) network.retry();
+        network.assertExecuted(FIRST_COMMAND + i);
     }
     fakeNow += MESSAGE_TIMEOUT; // Wrap the uint32_t clock, not the retry identity.
     network.core.poll();
@@ -1381,7 +1603,11 @@ int main(int, char**) {
     RUN_TEST(test_distinct_message_ids_execute_on_and_off_independently);
     RUN_TEST(test_two_lamp_confirmed_power_states_are_independent);
     RUN_TEST(test_expired_power_command_preserves_old_value_as_stale);
-    RUN_TEST(test_overlapping_same_lamp_commands_keep_history_stale_on_reordered_acks);
+    RUN_TEST(test_one_output_command_in_flight_per_lamp_across_power_and_brightness);
+    RUN_TEST(test_brightness_values_traverse_full_path_and_update_only_after_executed_ack);
+    RUN_TEST(test_brightness_capability_range_invalid_ack_retry_and_timeout);
+    RUN_TEST(test_pwm_driver_failure_returns_failed_ack_without_confirming_new_level);
+    RUN_TEST(test_two_lamps_keep_brightness_and_command_ack_state_independent);
     RUN_TEST(test_two_lamps_route_power_and_correlate_retries_independently);
     RUN_TEST(test_core_refuses_offline_lamp_or_main_without_transmitting);
     RUN_TEST(test_removal_guard_is_lamp_scoped_and_blocks_unknown_execution);

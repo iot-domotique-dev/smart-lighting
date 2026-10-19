@@ -39,6 +39,12 @@ enum class LastConfirmedPowerStatus : uint8_t {
     STALE
 };
 
+enum class LastConfirmedBrightnessStatus : uint8_t {
+    UNKNOWN,
+    CONFIRMED,
+    STALE
+};
+
 
 struct Device {
 
@@ -65,6 +71,14 @@ struct Device {
     /* Sticky until reboot: an expired command may still execute late. */
     bool powerExecutionUnknown;
 
+    /* Software output level confirmed by SET_BRIGHTNESS / SET_POWER ACKs. */
+    uint8_t lastConfirmedBrightness;
+    LastConfirmedBrightnessStatus lastConfirmedBrightnessStatus;
+    /* Retained setpoint used by SET_POWER ON after OFF; RAM history only. */
+    uint8_t lastConfirmedNonzeroBrightness;
+    bool lastConfirmedNonzeroBrightnessKnown;
+    bool brightnessExecutionUnknown;
+
 };
 
 inline void markLastConfirmedPowerStale(Device& device) {
@@ -73,6 +87,20 @@ inline void markLastConfirmedPowerStale(Device& device) {
         device.lastConfirmedPowerStatus == LastConfirmedPowerStatus::CONFIRMED) {
         device.lastConfirmedPowerStatus = LastConfirmedPowerStatus::STALE;
     }
+}
+
+inline void markLastConfirmedBrightnessStale(Device& device) {
+    if (device.role == DeviceRole::LAMP &&
+        device.lastConfirmedBrightnessStatus ==
+            LastConfirmedBrightnessStatus::CONFIRMED) {
+        device.lastConfirmedBrightnessStatus =
+            LastConfirmedBrightnessStatus::STALE;
+    }
+}
+
+inline void markLastConfirmedOutputStale(Device& device) {
+    markLastConfirmedPowerStale(device);
+    markLastConfirmedBrightnessStale(device);
 }
 
 inline bool hasDeviceCapability(

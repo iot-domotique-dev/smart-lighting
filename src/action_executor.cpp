@@ -128,10 +128,12 @@ ExecutionStatus executeAction(
 
                 case ActionType::SET_LAMP_BRIGHTNESS:
 
-                    setLampBrightness(
+                    if (!setLampBrightness(
                         *lamp,
                         action.value
-                    );
+                    )) {
+                        return ExecutionStatus::FAILED;
+                    }
 
                     break;
 

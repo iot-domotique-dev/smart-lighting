@@ -4,6 +4,7 @@
 #include <unity.h>
 
 #include "core_api_service.h"
+#include "core_http_brightness_parser.h"
 #include "core_module_service.h"
 #include "communication.h"
 
@@ -146,7 +147,7 @@ void test_devices_list_and_known_device_report_connectivity_not_fake_domain_stat
     assertContains("\"status\":\"offline\"");
     assertContains("\"parent_id\":");
     assertContains("\"state\":null");
-    assertContains("\"last_confirmed_state\":{\"power\":null,\"status\":\"unknown\"}");
+    assertContains("\"last_confirmed_state\":{\"power\":null,\"status\":\"unknown\",\"brightness_percent\":null,\"brightness_status\":\"unknown\"}");
     assertContains("\"count\":1");
     TEST_ASSERT_NULL(strstr(response, "MAIN_LIGHTING"));
 
@@ -157,7 +158,7 @@ void test_devices_list_and_known_device_report_connectivity_not_fake_domain_stat
     assertContains("\"device\":{\"id\":");
     assertContains("\"online\":false");
     assertContains("\"state\":null");
-    assertContains("\"last_confirmed_state\":{\"power\":null,\"status\":\"unknown\"}");
+    assertContains("\"last_confirmed_state\":{\"power\":null,\"status\":\"unknown\",\"brightness_percent\":null,\"brightness_status\":\"unknown\"}");
 }
 
 void test_last_confirmed_power_is_additive_and_offline_history_is_stale() {
@@ -172,11 +173,16 @@ void test_last_confirmed_power_is_additive_and_offline_history_is_stale() {
     TEST_ASSERT_NOT_NULL(lamp);
     lamp->lastConfirmedPower = LastConfirmedPower::ON;
     lamp->lastConfirmedPowerStatus = LastConfirmedPowerStatus::CONFIRMED;
+    lamp->lastConfirmedBrightness = 50;
+    lamp->lastConfirmedBrightnessStatus =
+        LastConfirmedBrightnessStatus::CONFIRMED;
+    lamp->lastConfirmedNonzeroBrightness = 50;
+    lamp->lastConfirmedNonzeroBrightnessKnown = true;
 
     size_t length = 0;
     TEST_ASSERT_EQUAL_UINT16(200, request("GET", "/api/v1/devices", length));
     assertContains("\"state\":null");
-    assertContains("\"last_confirmed_state\":{\"power\":\"on\",\"status\":\"confirmed\"}");
+    assertContains("\"last_confirmed_state\":{\"power\":\"on\",\"status\":\"confirmed\",\"brightness_percent\":50,\"brightness_status\":\"confirmed\"}");
 
     TEST_ASSERT_TRUE(setDeviceStatus(registry, lampId, DeviceStatus::OFFLINE, 9000));
     char path[64] = {};
@@ -185,7 +191,36 @@ void test_last_confirmed_power_is_additive_and_offline_history_is_stale() {
     TEST_ASSERT_EQUAL_UINT16(200, request("GET", path, length));
     assertContains("\"online\":false");
     assertContains("\"state\":null");
-    assertContains("\"last_confirmed_state\":{\"power\":\"on\",\"status\":\"stale\"}");
+    assertContains("\"last_confirmed_state\":{\"power\":\"on\",\"status\":\"stale\",\"brightness_percent\":50,\"brightness_status\":\"stale\"}");
+}
+
+void test_brightness_body_parser_accepts_only_integer_percent_0_to_100() {
+    const struct { const char* body; int32_t expected; } valid[] = {
+        {"{\"percent\":0}", 0}, {"{ \"percent\" : 1 }", 1},
+        {"{\"percent\":50}", 50}, {"{\"percent\":100}", 100}
+    };
+    for (const auto& item : valid) {
+        int32_t percent = -7;
+        TEST_ASSERT_TRUE(parseCoreBrightnessRequestBody(
+            item.body, strlen(item.body), percent));
+        TEST_ASSERT_EQUAL_INT32(item.expected, percent);
+    }
+
+    const char* invalid[] = {
+        "{\"percent\":-1}", "{\"percent\":101}",
+        "{\"percent\":50.0}", "{\"percent\":\"50\"}",
+        "{\"percent\":true}", "{\"percent\":01}",
+        "{\"percent\":50,\"state\":\"on\"}",
+        "{\"percent\":50,\"percent\":60}", "[]", "{}"
+    };
+    for (const char* body : invalid) {
+        int32_t percent = -7;
+        TEST_ASSERT_FALSE(parseCoreBrightnessRequestBody(
+            body, strlen(body), percent));
+        TEST_ASSERT_EQUAL_INT32(-7, percent);
+    }
+    int32_t percent = -7;
+    TEST_ASSERT_FALSE(parseCoreBrightnessRequestBody("{}", 65, percent));
 }
 
 void test_unknown_device_is_404() {
@@ -254,6 +289,7 @@ int main(int, char**) {
     RUN_TEST(test_module_item_returns_known_main_and_unknown_module_is_404);
     RUN_TEST(test_devices_list_and_known_device_report_connectivity_not_fake_domain_state);
     RUN_TEST(test_last_confirmed_power_is_additive_and_offline_history_is_stale);
+    RUN_TEST(test_brightness_body_parser_accepts_only_integer_percent_0_to_100);
     RUN_TEST(test_unknown_device_is_404);
     RUN_TEST(test_invalid_ids_unknown_routes_and_unsupported_methods_have_http_errors);
     RUN_TEST(test_empty_inventory_returns_empty_arrays);

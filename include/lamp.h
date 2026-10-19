@@ -12,6 +12,9 @@ struct LampState {
 
     bool automatic;
 
+    /* Default applied after a cold start; not persisted to NVS. */
+    uint8_t lastNonzeroBrightness = 100;
+
 };
 
 enum class PairingState : uint8_t {

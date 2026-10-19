@@ -743,6 +743,7 @@ DiscoveryResult MainProvisioning::discover(
         if (byHardwareId->device.id == announcement.deviceId &&
             byHardwareId->identity.parentMainId == mainId &&
             byHardwareId->identity.pairingState == PairingState::PAIRED) {
+            byHardwareId->device.capabilities = announcement.capabilities;
             return DiscoveryResult::RECOGNIZED_PAIRED;
         }
         return DiscoveryResult::IDENTITY_CONFLICT;
@@ -757,6 +758,7 @@ DiscoveryResult MainProvisioning::discover(
     restored.device.role = DeviceRole::LAMP;
     restored.device.status = DeviceStatus::ONLINE;
     restored.device.lastSeen = millis();
+    restored.device.capabilities = announcement.capabilities;
     restored.state = {false, 0, false};
     copyText(restored.identity.hardwareId, sizeof(restored.identity.hardwareId),
              announcement.hardwareId);
@@ -872,6 +874,10 @@ bool MainProvisioning::confirmPairing(
     paired.device.role = DeviceRole::LAMP;
     paired.device.status = DeviceStatus::ONLINE;
     paired.device.lastSeen = millis();
+    const int8_t discoveredIndex = findDiscovered(confirmation.hardwareId);
+    if (discoveredIndex >= 0) {
+        paired.device.capabilities = discovered[discoveredIndex].capabilities;
+    }
     paired.state = {false, 0, false};
     copyText(paired.identity.hardwareId, sizeof(paired.identity.hardwareId),
              confirmation.hardwareId);
@@ -882,7 +888,6 @@ bool MainProvisioning::confirmPairing(
     if (!addLamp(registry, paired)) {
         return false;
     }
-    const int8_t discoveredIndex = findDiscovered(confirmation.hardwareId);
     if (discoveredIndex >= 0) {
         discovered[discoveredIndex] = confirmation;
         discoveredAt[discoveredIndex] = millis();

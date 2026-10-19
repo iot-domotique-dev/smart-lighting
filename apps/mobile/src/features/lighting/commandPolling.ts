@@ -2,17 +2,21 @@ import { CoreApiError } from '../../api/coreApiClient';
 import type { CommandStatusResponse, PowerState, V7Id } from '../../api/types';
 
 export type LampCommandFeedback =
-  | { phase: 'submitting'; requested: PowerState }
+  | { phase: 'submitting'; requested: PowerState; brightnessPercent?: number }
   | { phase: 'tracking'; requested: PowerState; commandId: V7Id;
-      commandState: 'sent' | 'accepted'; retries: number }
-  | { phase: 'refreshing'; requested: PowerState; message: string }
+      commandState: 'sent' | 'accepted'; retries: number; brightnessPercent?: number }
+  | { phase: 'refreshing'; requested: PowerState; message: string;
+      brightnessPercent?: number }
   | { phase: 'executed'; requested: PowerState; commandId: V7Id; retries: number;
-      refreshError?: string }
+      refreshError?: string; brightnessPercent?: number }
   | { phase: 'failed'; requested: PowerState; commandId: V7Id; retries: number;
-      message: string; refreshError?: string }
+      message: string; refreshError?: string; brightnessPercent?: number }
   | { phase: 'uncertain'; requested: PowerState; commandId?: V7Id; retries?: number;
-      message: string; refreshError?: string }
-  | { phase: 'rejected'; requested: PowerState; message: string; refreshError?: string };
+      message: string; refreshError?: string; brightnessPercent?: number }
+  | { phase: 'reconciled'; requested: PowerState; commandId?: V7Id; retries?: number;
+      message: string; refreshError?: string; brightnessPercent?: number }
+  | { phase: 'rejected'; requested: PowerState; message: string; refreshError?: string;
+      brightnessPercent?: number };
 
 export type CommandPollResult =
   | { kind: 'terminal'; command: CommandStatusResponse['command'] }
@@ -59,7 +63,7 @@ function retryable(error: unknown): boolean {
 
 export function isCommandInProgress(feedback?: LampCommandFeedback): boolean {
   return feedback?.phase === 'submitting' || feedback?.phase === 'tracking' ||
-    feedback?.phase === 'refreshing';
+    feedback?.phase === 'refreshing' || feedback?.phase === 'uncertain';
 }
 
 export function acquireLampCommand(lockedIds: Set<V7Id>, lampId: V7Id): boolean {

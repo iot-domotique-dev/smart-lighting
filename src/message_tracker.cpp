@@ -24,7 +24,7 @@ bool validCoreAck(const Message& command, const Message& ack) {
             return ack.sourceId == command.destinationId &&
                    ack.value == static_cast<int32_t>(ack.executionStatus);
         case ExecutionStatus::PARTIAL:
-            // V7.2 SET_POWER is indivisible; only an explicit final result applies.
+            // Output commands are indivisible; only an explicit final result applies.
             return false;
         case ExecutionStatus::FAILED:
             return (ack.sourceId == command.destinationId ||
@@ -32,7 +32,7 @@ bool validCoreAck(const Message& command, const Message& ack) {
                     ack.sourceId == command.sourceId) &&
                    (ack.value == static_cast<int32_t>(ExecutionStatus::FAILED) ||
                     (ack.value >= static_cast<int32_t>(CoreCommandError::UNKNOWN_DESTINATION) &&
-                     ack.value <= static_cast<int32_t>(CoreCommandError::REMOVAL_IN_PROGRESS)));
+                     ack.value <= static_cast<int32_t>(CoreCommandError::COMMAND_IN_PROGRESS)));
     }
     return false;
 }

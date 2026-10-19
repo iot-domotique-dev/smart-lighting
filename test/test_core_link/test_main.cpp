@@ -332,7 +332,8 @@ void test_lamp_reannouncement_preserves_state_only_for_same_v7_identity() {
         static_cast<int>(ingestCoreModuleAnnouncement(registry, main, 100)));
 
     CoreModuleAnnouncement lampAnnouncement = {
-        17, mainId, "LAMP_C6", DeviceRole::LAMP, DEVICE_CAP_POWER
+        17, mainId, "LAMP_C6", DeviceRole::LAMP,
+        DEVICE_CAP_POWER | DEVICE_CAP_BRIGHTNESS
     };
     TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreModuleUpdateResult::REGISTERED),
         static_cast<int>(ingestCoreModuleAnnouncement(registry, lampAnnouncement, 200)));
@@ -343,6 +344,11 @@ void test_lamp_reannouncement_preserves_state_only_for_same_v7_identity() {
                           static_cast<int>(lamp->lastConfirmedPower));
     lamp->lastConfirmedPower = LastConfirmedPower::ON;
     lamp->lastConfirmedPowerStatus = LastConfirmedPowerStatus::CONFIRMED;
+    lamp->lastConfirmedBrightness = 62;
+    lamp->lastConfirmedBrightnessStatus =
+        LastConfirmedBrightnessStatus::CONFIRMED;
+    lamp->lastConfirmedNonzeroBrightness = 62;
+    lamp->lastConfirmedNonzeroBrightnessKnown = true;
 
     TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreModuleUpdateResult::UPDATED),
         static_cast<int>(ingestCoreModuleAnnouncement(registry, lampAnnouncement, 300)));
@@ -351,6 +357,19 @@ void test_lamp_reannouncement_preserves_state_only_for_same_v7_identity() {
                           static_cast<int>(lamp->lastConfirmedPower));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::CONFIRMED),
                           static_cast<int>(lamp->lastConfirmedPowerStatus));
+    TEST_ASSERT_EQUAL_UINT8(62, lamp->lastConfirmedBrightness);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(LastConfirmedBrightnessStatus::CONFIRMED),
+        static_cast<int>(lamp->lastConfirmedBrightnessStatus));
+
+    lampAnnouncement.capabilities = DEVICE_CAP_POWER;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreModuleUpdateResult::UPDATED),
+        static_cast<int>(ingestCoreModuleAnnouncement(registry, lampAnnouncement, 350)));
+    lamp = findDeviceById(registry, lampId);
+    TEST_ASSERT_EQUAL_UINT8(62, lamp->lastConfirmedBrightness);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(LastConfirmedBrightnessStatus::STALE),
+        static_cast<int>(lamp->lastConfirmedBrightnessStatus));
 
     lampAnnouncement.localId = 18;
     TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreModuleUpdateResult::REGISTERED),
@@ -360,6 +379,10 @@ void test_lamp_reannouncement_preserves_state_only_for_same_v7_identity() {
     TEST_ASSERT_NOT_NULL(replacement);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::UNKNOWN),
                           static_cast<int>(replacement->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(LastConfirmedBrightnessStatus::UNKNOWN),
+        static_cast<int>(replacement->lastConfirmedBrightnessStatus));
+    TEST_ASSERT_FALSE(replacement->lastConfirmedNonzeroBrightnessKnown);
 }
 
 void test_uart_pairing_candidate_operation_and_result_round_trip() {

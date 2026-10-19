@@ -10,13 +10,15 @@
 #include "event_bus.h"
 #include "group_manager.h"
 #include "lamp_controller.h"
+#include "lamp_hardware.h"
+#include "lamp_pwm_mapping.h"
 #include "message_deduplicator.h"
 #include "message_router.h"
 #include "message_tracker.h"
 #include "scene_manager.h"
 
-extern "C" void setUp(void) {}
-extern "C" void tearDown(void) {}
+extern "C" void setUp(void) { configureLampHardwareSimulation(false); }
+extern "C" void tearDown(void) { configureLampHardwareSimulation(false); }
 
 FakeHardwareSerial Serial;
 
@@ -150,36 +152,111 @@ void test_lamp_group_scene_registry_capacities() {
     TEST_ASSERT_EQUAL_UINT8(MAX_SCENES, scenes.count);
 }
 
-void test_brightness_saturates_int32_before_narrowing() {
+void test_pwm_simulation_brightness_values_and_restore_after_power_off() {
     Lamp lamp = makeLamp(1);
+    configureLampHardwareSimulation(true);
 
-    setLampBrightness(lamp, -1);
-    TEST_ASSERT_EQUAL_UINT8(0, lamp.state.brightness);
+    const uint8_t values[] = {0, 1, 50, 100};
+    for (uint8_t value : values) {
+        TEST_ASSERT_TRUE(setLampBrightness(lamp, value));
+        TEST_ASSERT_EQUAL_UINT8(value, lamp.state.brightness);
+        TEST_ASSERT_EQUAL_UINT8(value, simulatedLampHardwareOutput());
+        TEST_ASSERT_EQUAL(lamp.state.power, value != 0);
+    }
 
-    setLampBrightness(lamp, 101);
+    TEST_ASSERT_EQUAL_UINT8(100, lamp.state.lastNonzeroBrightness);
+    TEST_ASSERT_TRUE(setLampPower(lamp, false));
+    TEST_ASSERT_EQUAL_UINT8(0, simulatedLampHardwareOutput());
+    TEST_ASSERT_EQUAL_UINT8(100, lamp.state.lastNonzeroBrightness);
+    TEST_ASSERT_TRUE(setLampPower(lamp, true));
+    TEST_ASSERT_EQUAL_UINT8(100, simulatedLampHardwareOutput());
+
+    TEST_ASSERT_TRUE(setLampBrightness(lamp, 65));
+    TEST_ASSERT_TRUE(setLampBrightness(lamp, 0));
+    TEST_ASSERT_EQUAL_UINT8(0, simulatedLampHardwareOutput());
+    TEST_ASSERT_EQUAL_UINT8(65, lamp.state.lastNonzeroBrightness);
+    TEST_ASSERT_TRUE(setLampPower(lamp, true));
+    TEST_ASSERT_EQUAL_UINT8(65, simulatedLampHardwareOutput());
+
+    const uint8_t oldLevel = lamp.state.brightness;
+    TEST_ASSERT_FALSE(setLampBrightness(lamp, -1));
+    TEST_ASSERT_FALSE(setLampBrightness(lamp, 101));
+    TEST_ASSERT_EQUAL_UINT8(oldLevel, lamp.state.brightness);
+}
+
+void test_pwm_zero_off_and_full_scale_reaches_configured_allowed_ceiling() {
+    TEST_ASSERT_EQUAL_INT(0, lampPwmOffLevel(false));
+    TEST_ASSERT_EQUAL_INT(1, lampPwmOffLevel(true));
+    TEST_ASSERT_EQUAL_INT(1, lampPwmPowerLevel(false, true));
+    TEST_ASSERT_EQUAL_INT(0, lampPwmPowerLevel(false, false));
+    TEST_ASSERT_EQUAL_INT(0, lampPwmPowerLevel(true, true));
+    TEST_ASSERT_EQUAL_INT(1, lampPwmPowerLevel(true, false));
+    TEST_ASSERT_FALSE(lampPwmOutputInvert(false));
+    TEST_ASSERT_TRUE(lampPwmOutputInvert(true));
+    TEST_ASSERT_EQUAL_UINT32(0, lampPwmDutyFromPercent(1023, 25, 0));
+    TEST_ASSERT_EQUAL_UINT32(128, lampPwmDutyFromPercent(1023, 25, 50));
+    TEST_ASSERT_EQUAL_UINT32(256, lampPwmDutyFromPercent(1023, 25, 100));
+    TEST_ASSERT_EQUAL_UINT32(1, lampPwmDutyFromPercent(1023, 1, 1));
+
+    configureLampHardwareSimulation(true, 25);
+    Lamp lamp = makeLamp(1);
+    TEST_ASSERT_TRUE(setLampBrightness(lamp, 0));
+    TEST_ASSERT_EQUAL_UINT8(0, simulatedLampHardwareOutput());
+    TEST_ASSERT_TRUE(setLampBrightness(lamp, 50));
+    TEST_ASSERT_EQUAL_UINT8(13, simulatedLampHardwareOutput());
+    TEST_ASSERT_EQUAL_UINT8(50, lamp.state.brightness);
+    TEST_ASSERT_TRUE(setLampBrightness(lamp, 100));
+    TEST_ASSERT_EQUAL_UINT8(25, simulatedLampHardwareOutput());
     TEST_ASSERT_EQUAL_UINT8(100, lamp.state.brightness);
+    TEST_ASSERT_TRUE(setLampPower(lamp, false));
+    TEST_ASSERT_EQUAL_UINT8(0, simulatedLampHardwareOutput());
+    TEST_ASSERT_TRUE(setLampPower(lamp, true));
+    TEST_ASSERT_EQUAL_UINT8(25, simulatedLampHardwareOutput());
+}
 
-    setLampBrightness(lamp, 65);
-    TEST_ASSERT_EQUAL_UINT8(65, lamp.state.brightness);
+void test_brightness_refused_without_pwm_and_after_hardware_failure() {
+    Lamp lamp = makeLamp(1);
+    configureLampHardwareSimulation(false);
+    TEST_ASSERT_FALSE(lampHardwareSupportsBrightness());
+    TEST_ASSERT_FALSE(setLampBrightness(lamp, 50));
+    TEST_ASSERT_EQUAL_UINT8(0, lamp.state.brightness);
 
     LampRegistry lamps;
     initLampRegistry(lamps);
-    TEST_ASSERT_TRUE(addLamp(lamps, makeLamp(2)));
+    TEST_ASSERT_TRUE(addLamp(lamps, lamp));
     GroupRegistry groups;
     initGroupRegistry(groups);
     SceneRegistry scenes;
     initSceneRegistry(scenes);
+    Action brightnessAction = {ActionType::SET_LAMP_BRIGHTNESS, 1, 50};
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ExecutionStatus::FAILED),
+        static_cast<int>(executeAction(brightnessAction, scenes, groups, lamps)));
 
-    Action brightnessAction = {
-        ActionType::SET_LAMP_BRIGHTNESS,
-        2,
-        300
-    };
-    TEST_ASSERT_EQUAL_INT(
-        static_cast<int>(ExecutionStatus::EXECUTED),
-        static_cast<int>(executeAction(brightnessAction, scenes, groups, lamps))
-    );
-    TEST_ASSERT_EQUAL_UINT8(100, findLamp(lamps, 2)->state.brightness);
+    configureLampHardwareSimulation(true);
+    Lamp* simulatedLamp = findLamp(lamps, 1);
+    TEST_ASSERT_NOT_NULL(simulatedLamp);
+    failNextLampHardwareWrite();
+    TEST_ASSERT_FALSE(setLampBrightness(*simulatedLamp, 50));
+    TEST_ASSERT_EQUAL_UINT8(0, simulatedLamp->state.brightness);
+    TEST_ASSERT_EQUAL_UINT8(0, simulatedLampHardwareOutput());
+
+    brightnessAction.value = 300;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ExecutionStatus::FAILED),
+        static_cast<int>(executeAction(brightnessAction, scenes, groups, lamps)));
+}
+
+void test_pwm_reboot_starts_low_and_uses_ram_default_until_reconfigured() {
+    configureLampHardwareSimulation(true);
+    Lamp beforeReboot = makeLamp(1);
+    TEST_ASSERT_TRUE(setLampBrightness(beforeReboot, 35));
+    TEST_ASSERT_EQUAL_UINT8(35, simulatedLampHardwareOutput());
+
+    initializeLampHardware();
+    TEST_ASSERT_EQUAL_UINT8(0, simulatedLampHardwareOutput());
+    Lamp afterReboot = makeLamp(1);
+    TEST_ASSERT_EQUAL_UINT8(100, afterReboot.state.lastNonzeroBrightness);
+    TEST_ASSERT_TRUE(setLampPower(afterReboot, true));
+    TEST_ASSERT_EQUAL_UINT8(100, simulatedLampHardwareOutput());
 }
 
 void test_message_tracker_ack_retry_timeout_and_reuse() {
@@ -413,7 +490,10 @@ void test_device_seen_and_timeout_publish_status_events() {
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_lamp_group_scene_registry_capacities);
-    RUN_TEST(test_brightness_saturates_int32_before_narrowing);
+    RUN_TEST(test_pwm_simulation_brightness_values_and_restore_after_power_off);
+    RUN_TEST(test_pwm_zero_off_and_full_scale_reaches_configured_allowed_ceiling);
+    RUN_TEST(test_pwm_reboot_starts_low_and_uses_ram_default_until_reconfigured);
+    RUN_TEST(test_brightness_refused_without_pwm_and_after_hardware_failure);
     RUN_TEST(test_message_tracker_ack_retry_timeout_and_reuse);
     RUN_TEST(test_tracker_reuses_completed_entry_but_respects_pending_capacity);
     RUN_TEST(test_deduplicator_uses_source_and_message_id_and_evicts_oldest);

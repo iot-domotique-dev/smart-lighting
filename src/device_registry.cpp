@@ -170,7 +170,7 @@ bool setDeviceStatus(
     device->status = status;
     device->lastSeen = lastSeen;
     if (status == DeviceStatus::OFFLINE) {
-        markLastConfirmedPowerStale(*device);
+        markLastConfirmedOutputStale(*device);
     }
     return true;
 }

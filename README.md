@@ -14,13 +14,14 @@ Projet de modules d’éclairage ESP32. V7.1 fournit un CORE logique composé de
 - **V7.5.1/V7.5.2 — application mobile :** l’application Android Expo SDK 57 consulte CORE-WIFI et pilote les lampes en ON/OFF via l’API existante. Le premier essai nominal a été confirmé par l’utilisateur avec une LED de test raccordée à GPIO18 d’une LAMP_C6. Le bilan logiciel et les limites matérielles restantes sont dans le [dossier V7.5](docs/V7_5_MOBILE_APP.md).
 - **V7.6.4 — ajout depuis l’application mobile :** le parcours nominal d’ajout a été confirmé sur matériel avec un MAIN et une LAMP. Le correctif de routage des annonces MAIN→CORE-WIFI a également été exercé dans ce parcours; le multi-MAIN et plusieurs lampes physiques restent hors de cette validation. Voir le [dossier V7.6](docs/V7_6_PAIRING.md).
 - **V7.7.2/V7.7.3 — parcours nominal Android validé sur matériel le 15 octobre 2026 :** découverte, nommage, appairage, commandes ON/OFF, retrait depuis l’application, réappairage avec un nouvel ID V7 et persistance après redémarrage. La validation porte sur un MAIN et une LAMP. Les 119 tests natifs firmware et 56 tests mobiles simulés, le lint, le typage et l’export Android avaient réussi. Les essais de concurrence, multi-lampes simultané et de récupération après panne restent à faire. Voir le [dossier V7.7](docs/V7_7_UNPAIRING.md).
+- **V7.8.0 — luminosité validée fonctionnellement sur matériel le 16 octobre 2026 :** depuis Android, la commande de 0 à 100 % traverse HTTP, UART et Zigbee et pilote la LED témoin physique sur GPIO18 de LAMP_C6. Le profil unique `lamp_c6` utilise LEDC et conserve ON/OFF. Les fonctions V7.7 d’appairage, retrait et réappairage restent dans le périmètre logiciel; leur validation matérielle antérieure du 15 octobre est documentée séparément. Le banc V7.8 utilise un MAIN et une LAMP. La luminosité n’est pas persistée en NVS après un redémarrage à froid de la LAMP. Le multi-lampes simultané et les scénarios de panne/récupération ne sont pas validés. Voir [le dossier V7.8](docs/V7_8_BRIGHTNESS.md).
 
 Le jeton de l’API de commande doit être défini dans le fichier local `include/wifi_credentials.h`; sans jeton valide, les routes de commande restent désactivées. Vérifier la marge flash CORE-WIFI après compilation avant flash matériel.
 
 ## Architecture
 
 ~~~text
-Application mobile (V7.7.3; retrait API V7.7.2)
+Application mobile (V7.8.0; retrait API V7.7.2)
              │ HTTP local /api/v1
              ▼
    C6-WIFI — registre CORE, IDs, Wi-Fi, API
@@ -38,7 +39,7 @@ Le CORE garde l’ID racine 1. L’application ne communique pas directement ave
 - **core_wifi_c6**
 - **core_zigbee_c6**
 - **main_light_c6**
-- **lamp_c6**
+- **lamp_c6** — GPIO18 avec PWM LEDC pour le prototype LED basse tension, ON/OFF et luminosité; ne pas utiliser pour une charge secteur ou de puissance
 - **native** pour les tests hôte
 
 Les anciens environnements génériques **core**, **main** et **relay** restent déclarés pour compatibilité et ne remplacent pas les profils matériels C6.

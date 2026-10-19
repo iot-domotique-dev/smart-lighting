@@ -7,13 +7,20 @@ class CoreCommandService {
     DeviceRegistry& registry;
     MessageTracker& tracker;
     Communication& link;
+    CoreCommandError submitOutputCommand(uint32_t destinationId,
+        int32_t commandType, int32_t value, uint32_t& messageId,
+        uint32_t requestedId);
 public:
     CoreCommandService(DeviceRegistry& devices, MessageTracker& messages,
                        Communication& commandLink);
     CoreCommandError submitPower(uint32_t destinationId, bool power,
                                 uint32_t& messageId, uint32_t requestedId = 0);
+    CoreCommandError submitBrightness(uint32_t destinationId, int32_t percent,
+                                     uint32_t& messageId,
+                                     uint32_t requestedId = 0);
     bool handleReply(const Message& message);
     bool hasUnresolvedPowerCommand(uint32_t destinationId) const;
+    bool hasUnresolvedOutputCommand(uint32_t destinationId) const;
     void poll();
 };
 

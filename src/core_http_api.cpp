@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "core_command_protocol.h"
+#include "core_http_brightness_parser.h"
 #include "core_http_auth.h"
 #include "core_module_service.h"
 #include "esp_random.h"
@@ -52,7 +53,9 @@ bool parseId(const char* first, const char* last, uint32_t& id) {
     return true;
 }
 
-enum class CommandRouteKind : uint8_t { NONE, SUBMIT_POWER, STATUS, INVALID };
+enum class CommandRouteKind : uint8_t {
+    NONE, SUBMIT_POWER, SUBMIT_BRIGHTNESS, STATUS, INVALID
+};
 
 enum class PairingRouteKind : uint8_t {
     NONE,
@@ -101,11 +104,14 @@ CommandRoute parseCommandRoute(const char* uri) {
     const char* suffix = strstr(idStart, "/commands/");
     if (suffix == nullptr) return {CommandRouteKind::NONE, 0};
     uint32_t id = 0;
-    if (!parseId(idStart, suffix, id) ||
-        strcmp(suffix, "/commands/power") != 0 || strchr(uri, '?') != nullptr) {
+    if (!parseId(idStart, suffix, id) || strchr(uri, '?') != nullptr) {
         return {CommandRouteKind::INVALID, 0};
     }
-    return {CommandRouteKind::SUBMIT_POWER, id};
+    if (strcmp(suffix, "/commands/power") == 0)
+        return {CommandRouteKind::SUBMIT_POWER, id};
+    if (strcmp(suffix, "/commands/brightness") == 0)
+        return {CommandRouteKind::SUBMIT_BRIGHTNESS, id};
+    return {CommandRouteKind::INVALID, 0};
 }
 
 PairingRoute parsePairingRoute(const char* uri) {
@@ -422,6 +428,22 @@ bool receivePowerState(httpd_req_t* request, bool& power) {
     return false;
 }
 
+bool receiveBrightnessPercent(httpd_req_t* request, int32_t& percent) {
+    if (request->content_len == 0 || request->content_len > MAX_COMMAND_BODY_BYTES ||
+        !isJsonContentType(request)) {
+        return false;
+    }
+    char body[MAX_COMMAND_BODY_BYTES + 1] = {};
+    size_t received = 0;
+    while (received < request->content_len) {
+        const int count = httpd_req_recv(request, body + received,
+            request->content_len - received);
+        if (count <= 0) return false;
+        received += static_cast<size_t>(count);
+    }
+    return parseCoreBrightnessRequestBody(body, received, percent);
+}
+
 esp_err_t sendJson(httpd_req_t* request, uint16_t status,
                    const char* body, size_t length, const char* allow = nullptr,
                    bool unauthorizedResponse = false) {
@@ -463,7 +485,7 @@ const char* commandError(const PendingMessage& pending) {
         return nullptr;
     const int32_t error = pending.message.value2;
     if (error >= static_cast<int32_t>(CoreCommandError::UNKNOWN_DESTINATION) &&
-        error <= static_cast<int32_t>(CoreCommandError::REMOVAL_IN_PROGRESS)) {
+        error <= static_cast<int32_t>(CoreCommandError::COMMAND_IN_PROGRESS)) {
         return coreCommandErrorName(static_cast<CoreCommandError>(error));
     }
     return "execution_failed";
@@ -486,10 +508,15 @@ esp_err_t handleCommandRequest(CommandApiContext& api, httpd_req_t* request,
     if (!authorized(request, api.apiToken))
         return sendError(request, 401, "unauthorized", "A valid Bearer token is required.");
 
-    if (route.kind == CommandRouteKind::SUBMIT_POWER) {
+    if (route.kind == CommandRouteKind::SUBMIT_POWER ||
+        route.kind == CommandRouteKind::SUBMIT_BRIGHTNESS) {
+        const bool isBrightness =
+            route.kind == CommandRouteKind::SUBMIT_BRIGHTNESS;
         if (request->method != HTTP_POST)
             return sendError(request, 405, "method_not_allowed",
-                             "Use POST to submit a power command.", "POST");
+                             isBrightness
+                                 ? "Use POST to submit a brightness command."
+                                 : "Use POST to submit a power command.", "POST");
         if (request->content_len > MAX_COMMAND_BODY_BYTES)
             return sendError(request, 413, "payload_too_large",
                              "The command body must not exceed 64 bytes.");
@@ -497,16 +524,24 @@ esp_err_t handleCommandRequest(CommandApiContext& api, httpd_req_t* request,
             return sendError(request, 415, "unsupported_media_type",
                              "Content-Type must be application/json.");
         bool power = false;
-        if (!receivePowerState(request, power))
+        int32_t percent = 0;
+        const bool validBody = isBrightness
+            ? receiveBrightnessPercent(request, percent)
+            : receivePowerState(request, power);
+        if (!validBody)
             return sendError(request, 400, "bad_request",
-                             "Expected a JSON body with state set to on or off.");
+                isBrightness
+                    ? "Expected a JSON body with integer percent from 0 to 100."
+                    : "Expected a JSON body with state set to on or off.");
 
         if (api.registryMutex == nullptr || *api.registryMutex == nullptr ||
             xSemaphoreTake(*api.registryMutex, pdMS_TO_TICKS(250)) != pdTRUE) {
             return sendError(request, 503, "core_busy", "The CORE is busy; retry shortly.");
         }
         uint32_t id = 0;
-        const CoreCommandError result = api.commands.submitPower(route.id, power, id);
+        const CoreCommandError result = isBrightness
+            ? api.commands.submitBrightness(route.id, percent, id)
+            : api.commands.submitPower(route.id, power, id);
         (void)xSemaphoreGive(*api.registryMutex);
         if (result != CoreCommandError::NONE) {
             switch (result) {
@@ -531,6 +566,15 @@ esp_err_t handleCommandRequest(CommandApiContext& api, httpd_req_t* request,
                 case CoreCommandError::REMOVAL_IN_PROGRESS:
                     return sendError(request, 409, "removal_in_progress",
                                      "The lamp is being removed.");
+                case CoreCommandError::UNSUPPORTED_CAPABILITY:
+                    return sendError(request, 409, "unsupported_capability",
+                                     "The lamp does not support brightness control.");
+                case CoreCommandError::COMMAND_IN_PROGRESS:
+                    return sendError(request, 409, "command_in_progress",
+                                     "Another output command is still awaiting a final result.");
+                case CoreCommandError::INVALID_COMMAND:
+                    return sendError(request, 400, "bad_request",
+                                     "The command value is invalid.");
                 default:
                     return sendError(request, 500, "command_rejected",
                                      "The CORE rejected the command.");

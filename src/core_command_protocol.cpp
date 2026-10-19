@@ -26,6 +26,18 @@ bool validCorePowerCommand(const Message& message) {
            (message.value == 0 || message.value == 1);
 }
 
+bool validCoreBrightnessCommand(const Message& message) {
+    return isCoreCommandMessage(message) && message.id != 0 &&
+           message.destinationId != 0 && message.provisioningDeviceId != 0 &&
+           message.commandType ==
+               static_cast<int32_t>(ActionType::SET_LAMP_BRIGHTNESS) &&
+           message.value >= 0 && message.value <= 100;
+}
+
+bool validCoreOutputCommand(const Message& message) {
+    return validCorePowerCommand(message) || validCoreBrightnessCommand(message);
+}
+
 Message makeCoreCommandAck(const Message& command, uint32_t sourceId,
                            ExecutionStatus execution, CoreCommandError error) {
     Message ack = {};
@@ -56,7 +68,7 @@ CoreCommandError resolveCoreLampCommand(LampRegistry& lamps,
             break;
         }
     }
-    if (!validCorePowerCommand(command)) return CoreCommandError::INVALID_COMMAND;
+    if (!validCoreOutputCommand(command)) return CoreCommandError::INVALID_COMMAND;
     Lamp* lamp = findLamp(lamps, command.provisioningDeviceId);
     if (lamp == nullptr) return CoreCommandError::UNKNOWN_DESTINATION;
     const uint32_t mainId = makeCoreModuleId(CORE_LOGICAL_ID,
@@ -65,6 +77,11 @@ CoreCommandError resolveCoreLampCommand(LampRegistry& lamps,
         lamp->identity.parentMainId == 0 || command.parentMainId != mainId ||
         command.destinationId != makeCoreModuleId(mainId, lamp->device.id)) {
         return CoreCommandError::INVALID_ROUTE;
+    }
+    if (command.commandType ==
+            static_cast<int32_t>(ActionType::SET_LAMP_BRIGHTNESS) &&
+        !hasDeviceCapability(lamp->device, DEVICE_CAP_BRIGHTNESS)) {
+        return CoreCommandError::UNSUPPORTED_CAPABILITY;
     }
     replyHop = lamp->identity.parentMainId;
     targetId = lamp->device.id;
@@ -84,6 +101,8 @@ const char* coreCommandErrorName(CoreCommandError error) {
         case CoreCommandError::TRACKER_FULL: return "tracker_full";
         case CoreCommandError::DUPLICATE_ID: return "duplicate_id";
         case CoreCommandError::REMOVAL_IN_PROGRESS: return "removal_in_progress";
+        case CoreCommandError::UNSUPPORTED_CAPABILITY: return "unsupported_capability";
+        case CoreCommandError::COMMAND_IN_PROGRESS: return "command_in_progress";
     }
     return "execution_failed";
 }

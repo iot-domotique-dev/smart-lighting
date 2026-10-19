@@ -144,6 +144,15 @@ bool appendLastConfirmedState(JsonWriter& writer, const Device& device) {
         (device.lastConfirmedPowerStatus == LastConfirmedPowerStatus::STALE ||
          device.powerExecutionUnknown || !isOnline(device));
     const char* status = !known ? "unknown" : (stale ? "stale" : "confirmed");
+    const bool brightnessKnown = device.lastConfirmedBrightness <= 100 &&
+        device.lastConfirmedBrightnessStatus !=
+            LastConfirmedBrightnessStatus::UNKNOWN;
+    const bool brightnessStale = brightnessKnown &&
+        (device.lastConfirmedBrightnessStatus ==
+             LastConfirmedBrightnessStatus::STALE ||
+         device.brightnessExecutionUnknown || !isOnline(device));
+    const char* brightnessStatus = !brightnessKnown ? "unknown"
+        : (brightnessStale ? "stale" : "confirmed");
 
     if (!appendLiteral(writer, ",\"last_confirmed_state\":{\"power\":")) {
         return false;
@@ -154,8 +163,18 @@ bool appendLastConfirmedState(JsonWriter& writer, const Device& device) {
                    device.lastConfirmedPower == LastConfirmedPower::ON ? "on" : "off")) {
         return false;
     }
-    return appendLiteral(writer, ",\"status\":") &&
-           appendJsonString(writer, status) &&
+    if (!appendLiteral(writer, ",\"status\":") ||
+        !appendJsonString(writer, status) ||
+        !appendLiteral(writer, ",\"brightness_percent\":")) {
+        return false;
+    }
+    if (brightnessKnown) {
+        if (!appendUnsigned(writer, device.lastConfirmedBrightness)) return false;
+    } else if (!appendLiteral(writer, "null")) {
+        return false;
+    }
+    return appendLiteral(writer, ",\"brightness_status\":") &&
+           appendJsonString(writer, brightnessStatus) &&
            appendCharacter(writer, '}');
 }
 

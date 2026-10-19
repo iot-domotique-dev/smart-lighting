@@ -14,7 +14,7 @@ require.extensions['.ts'] = (module, filename) => {
 
 const { CoreApiError, describeApiError, getHealth, getCore, getModules, getDevices,
   getDevice, getCommand, getRemovalOperation, lampsOnly, requestDeviceRemoval,
-  submitPower } = require('../src/api/coreApiClient.ts');
+  submitBrightness, submitPower } = require('../src/api/coreApiClient.ts');
 const { acquireLampCommand, pollCommand, releaseLampCommand } =
   require('../src/features/lighting/commandPolling.ts');
 const originalFetch = global.fetch;
@@ -48,9 +48,13 @@ test('lecture health/core et inventaire de deux lampes indépendantes', async ()
       parent_id: 1, capabilities: ['lighting'], last_seen_ms: 1000, state: null }],
     count: 1 });
     if (url.endsWith('/devices')) return respond({ devices: [
-      { ...base, id: 11, last_confirmed_state: { power: 'on', status: 'confirmed' } },
+      { ...base, id: 11, capabilities: ['power', 'brightness'],
+        last_confirmed_state: { power: 'on', status: 'confirmed',
+          brightness_percent: 50, brightness_status: 'confirmed' } },
       { ...base, id: 12, name: 'lamp002', online: false, status: 'offline',
-        last_confirmed_state: { power: 'off', status: 'stale' } },
+        capabilities: ['power', 'brightness'],
+        last_confirmed_state: { power: 'off', status: 'stale',
+          brightness_percent: 25, brightness_status: 'stale' } },
       { ...base, id: 13, role: 'sensor', last_confirmed_state: null },
     ], count: 3 });
     if (url.endsWith('/devices/12')) return respond({ device: { ...base, id: 12,
@@ -66,6 +70,8 @@ test('lecture health/core et inventaire de deux lampes indépendantes', async ()
   assert.deepEqual(lamps.map((lamp) => lamp.id), [11, 12]);
   assert.deepEqual(lamps.map((lamp) => lamp.last_confirmed_state.status),
     ['confirmed', 'stale']);
+  assert.equal(lamps[0].last_confirmed_state.brightness_percent, 50);
+  assert.equal(lamps[1].last_confirmed_state.brightness_status, 'stale');
   assert.equal((await getDevice('192.168.1.20', 12)).device.id, 12);
   assert.ok(requests.every(([url, method]) =>
     url.startsWith('http://192.168.1.20/api/v1/') && method === 'GET'));
@@ -76,6 +82,37 @@ test('une réponse d’état lampe invalide est refusée', async () => {
     last_confirmed_state: { power: 'on', status: 'unknown' } }], count: 1 });
   await assert.rejects(getDevices('192.168.1.20'),
     (error) => error instanceof CoreApiError && error.kind === 'invalid_response');
+});
+
+test('le client accepte les états brightness unknown et les réponses V7.8 sans champs brightness', async () => {
+  global.fetch = async (url) => {
+    const state = url.endsWith('/devices/11')
+      ? { power: null, status: 'unknown', brightness_percent: null,
+        brightness_status: 'unknown' }
+      : { power: 'off', status: 'confirmed' };
+    return respond({ device: { ...base, id: url.endsWith('/devices/11') ? 11 : 12,
+      last_confirmed_state: state } });
+  };
+  assert.equal((await getDevice('192.168.1.20', 11)).device.last_confirmed_state.brightness_status,
+    'unknown');
+  assert.equal((await getDevice('192.168.1.20', 12)).device.last_confirmed_state.brightness_percent,
+    undefined);
+});
+
+test('le client refuse les états brightness incohérents ou hors plage', async () => {
+  for (const last_confirmed_state of [
+    { power: 'on', status: 'confirmed', brightness_percent: null,
+      brightness_status: 'confirmed' },
+    { power: 'on', status: 'confirmed', brightness_percent: 101,
+      brightness_status: 'confirmed' },
+    { power: 'on', status: 'confirmed', brightness_percent: 20 },
+  ]) {
+    global.fetch = async () => respond({ devices: [
+      { ...base, id: 11, last_confirmed_state },
+    ], count: 1 });
+    await assert.rejects(getDevices('192.168.1.20'),
+      (error) => error instanceof CoreApiError && error.kind === 'invalid_response');
+  }
 });
 
 test('erreur HTTP du CORE et panne réseau sont distinguées', async () => {
@@ -108,6 +145,83 @@ test('POST ON et OFF utilisent la route existante et le Bearer token', async () 
     ['http://192.168.1.20/api/v1/devices/11/commands/power', 'POST', `Bearer ${token}`, 'on'],
     ['http://192.168.1.20/api/v1/devices/12/commands/power', 'POST', `Bearer ${token}`, 'off'],
   ]);
+});
+
+test('POST brightness envoie les entiers 0, 1, 50 et 100 sur la route V7.8.2', async () => {
+  const requests = [];
+  let nextId = 310;
+  global.fetch = async (url, options) => {
+    requests.push({ url, options });
+    return respond({ command: { id: nextId++, state: 'sent' } }, 202);
+  };
+  const token = 'test-token-not-a-real-secret-1234567890';
+  for (const percent of [0, 1, 50, 100]) {
+    const response = await submitBrightness('192.168.1.20', 11, percent, token);
+    assert.equal(response.command.state, 'sent');
+  }
+  assert.deepEqual(requests.map(({ url, options }) => [url, options.method,
+    options.headers.Authorization, JSON.parse(options.body)]), [
+    ['http://192.168.1.20/api/v1/devices/11/commands/brightness', 'POST',
+      `Bearer ${token}`, { percent: 0 }],
+    ['http://192.168.1.20/api/v1/devices/11/commands/brightness', 'POST',
+      `Bearer ${token}`, { percent: 1 }],
+    ['http://192.168.1.20/api/v1/devices/11/commands/brightness', 'POST',
+      `Bearer ${token}`, { percent: 50 }],
+    ['http://192.168.1.20/api/v1/devices/11/commands/brightness', 'POST',
+      `Bearer ${token}`, { percent: 100 }],
+  ]);
+});
+
+test('la validation brightness bloque les valeurs non entières/hors plage sans requête', async () => {
+  let attempts = 0;
+  global.fetch = async () => { attempts++; return respond({}); };
+  for (const percent of [-1, 101, 1.5, NaN, Infinity]) {
+    await assert.rejects(submitBrightness('192.168.1.20', 11, percent,
+      'test-token-123456789012345678901234'),
+    (error) => error instanceof CoreApiError && error.kind === 'invalid_response');
+  }
+  assert.equal(attempts, 0);
+});
+
+test('une réponse POST brightness perdue est marquée incertaine et ne peut être renvoyée par le client', async () => {
+  let attempts = 0;
+  global.fetch = async () => { attempts++; throw new Error('response lost'); };
+  await assert.rejects(submitBrightness('192.168.1.20', 11, 50,
+    'test-token-123456789012345678901234'),
+  (error) => error instanceof CoreApiError && error.kind === 'submission_uncertain');
+  assert.equal(attempts, 1);
+});
+
+test('brightness suit sent → accepted → executed puis relit le niveau confirmé', async () => {
+  const requests = [];
+  const states = ['sent', 'accepted', 'executed'];
+  global.fetch = async (url, options) => {
+    requests.push({ url, options });
+    if (url.endsWith('/commands/901')) {
+      return respond({ command: { id: 901, state: states.shift(), retries: 0 } });
+    }
+    if (url.endsWith('/devices/11')) return respond({ device: {
+      ...base, id: 11, capabilities: ['power', 'brightness'],
+      last_confirmed_state: { power: 'on', status: 'confirmed',
+        brightness_percent: 50, brightness_status: 'confirmed' },
+    } });
+    return respond({ command: { id: 901, state: 'sent' } }, 202);
+  };
+  const token = 'test-token-not-a-real-secret-1234567890';
+  const submitted = await submitBrightness('192.168.1.20', 11, 50, token);
+  const progress = [];
+  const outcome = await pollCommand(submitted.command.id,
+    () => getCommand('192.168.1.20', submitted.command.id, token), {
+      sleep: async () => {}, onStatus: (command) => progress.push(command.state),
+    });
+  assert.deepEqual(progress, ['sent', 'accepted', 'executed']);
+  assert.equal(outcome.kind, 'terminal');
+  const detail = await getDevice('192.168.1.20', 11);
+  assert.deepEqual(detail.device.last_confirmed_state, { power: 'on', status: 'confirmed',
+    brightness_percent: 50, brightness_status: 'confirmed' });
+  assert.deepEqual(requests.map(({ url, options }) => options.method),
+    ['POST', 'GET', 'GET', 'GET', 'GET']);
+  assert.equal(requests.filter(({ options }) => options.method === 'POST').length, 1);
 });
 
 test('POST retrait envoie une seule requête avec ID V7, operation_id et Bearer', async () => {

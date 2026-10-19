@@ -9,7 +9,7 @@ bool setLampPower(
 );
 
 
-void setLampBrightness(
+bool setLampBrightness(
     Lamp& lamp,
     int32_t brightness
 );

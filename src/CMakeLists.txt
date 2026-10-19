@@ -9,7 +9,15 @@ set(SMART_LIGHTING_COMPONENTS
     driver
 )
 if(SMART_LIGHTING_BUILD_ZIGBEE)
-    list(APPEND SMART_LIGHTING_COMPONENTS espressif__esp-zigbee-lib)
+    list(APPEND SMART_LIGHTING_COMPONENTS
+        espressif__esp-zigbee-lib
+    )
+endif()
+if(SMART_LIGHTING_BUILD_LAMP_PWM)
+    if(NOT SMART_LIGHTING_BUILD_ZIGBEE)
+        message(FATAL_ERROR "SMART_LIGHTING_BUILD_LAMP_PWM requires SMART_LIGHTING_BUILD_ZIGBEE")
+    endif()
+    list(APPEND SMART_LIGHTING_COMPONENTS esp_driver_ledc)
 endif()
 if(SMART_LIGHTING_BUILD_WIFI)
     list(APPEND SMART_LIGHTING_COMPONENTS esp_wifi esp_event esp_netif esp_http_server)

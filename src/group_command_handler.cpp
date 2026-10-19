@@ -92,10 +92,13 @@ bool executeGroupCommand(
 
             case CommandType::SET_GROUP_POWER:
 
-                setLampPower(
+                if (!setLampPower(
                     *lamp,
                     command.value != 0
-                );
+                )) {
+                    skippedCount++;
+                    break;
+                }
 
                 executedCount++;
 
@@ -104,10 +107,13 @@ bool executeGroupCommand(
 
             case CommandType::SET_GROUP_BRIGHTNESS:
 
-                setLampBrightness(
+                if (!setLampBrightness(
                     *lamp,
                     command.value
-                );
+                )) {
+                    skippedCount++;
+                    break;
+                }
 
                 executedCount++;
 

@@ -14,12 +14,16 @@ enum class CoreCommandError : int32_t {
     DEDUP_FULL = 15,
     TRACKER_FULL = 16,
     DUPLICATE_ID = 17,
-    REMOVAL_IN_PROGRESS = 18
+    REMOVAL_IN_PROGRESS = 18,
+    UNSUPPORTED_CAPABILITY = 19,
+    COMMAND_IN_PROGRESS = 20
 };
 
 bool isCoreCommandMessage(const Message& message);
 bool isCoreCommandReply(const Message& message);
 bool validCorePowerCommand(const Message& message);
+bool validCoreBrightnessCommand(const Message& message);
+bool validCoreOutputCommand(const Message& message);
 Message makeCoreCommandAck(const Message& command, uint32_t sourceId,
                            ExecutionStatus execution,
                            CoreCommandError error = CoreCommandError::NONE);

@@ -11,6 +11,7 @@
 #include "message_id_generator.h"
 #include "message_router.h"
 #include "v5_provisioning_runtime.h"
+#include "lamp_hardware.h"
 #include "zigbee_transport.h"
 
 namespace {
@@ -105,8 +106,12 @@ bool V5ProvisioningRuntime::begin(
         Serial.print(" logicalId=");
         Serial.println(mainLogicalId);
     } else if (role == DeviceRole::LAMP && lampStore != nullptr) {
+        const uint32_t capabilities =
+            static_cast<uint32_t>(DEVICE_CAP_POWER) |
+            (lampHardwareSupportsBrightness()
+                ? static_cast<uint32_t>(DEVICE_CAP_BRIGHTNESS) : 0U);
         lampPairing = new (std::nothrow)
-            ProvisioningLamp(hardwareId, "5.1.0", 0, *lampStore);
+            ProvisioningLamp(hardwareId, "5.1.0", capabilities, *lampStore);
         if (lampPairing == nullptr) {
             return false;
         }
@@ -299,8 +304,15 @@ void V5ProvisioningRuntime::announceAcceptedLamp(
     const ProvisioningPacket& lamp
 ) {
     if (role != DeviceRole::MAIN) return;
+    ProvisioningPacket announcementLamp = lamp;
+    Lamp* registered = findLamp(lamps, lamp.deviceId);
+    if (registered != nullptr &&
+        registered->identity.parentMainId == mainLogicalId) {
+        announcementLamp.capabilities = registered->device.capabilities;
+    }
     Message announcement = {};
-    if (!makeCoreLampAnnouncementFromMain(mainLogicalId, lamp, announcement)) return;
+    if (!makeCoreLampAnnouncementFromMain(mainLogicalId, announcementLamp,
+                                          announcement)) return;
     announcement.id = generateMessageId();
     announcement.timestamp = millis();
     (void)sendMessage(communication, announcement);
@@ -795,6 +807,7 @@ void V5ProvisioningRuntime::restoreLocalLamp() {
     local.device.role = DeviceRole::LAMP;
     local.device.status = DeviceStatus::ONLINE;
     local.device.lastSeen = millis();
+    local.device.capabilities = identity.capabilities;
     local.state = {false, 0, false};
     copyText(local.identity.hardwareId, sizeof(local.identity.hardwareId),
              identity.hardwareId);

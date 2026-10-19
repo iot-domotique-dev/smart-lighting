@@ -1,9 +1,13 @@
 export type V7Id = number;
 export type PowerState = 'on' | 'off';
+export type ConfirmedValueStatus = 'unknown' | 'confirmed' | 'stale';
 
-export type LastConfirmedState =
-  | { power: null; status: 'unknown' }
-  | { power: PowerState; status: 'confirmed' | 'stale' };
+export interface LastConfirmedState {
+  power: PowerState | null;
+  status: ConfirmedValueStatus;
+  brightness_percent?: number | null;
+  brightness_status?: ConfirmedValueStatus;
+}
 
 export interface HealthResponse {
   status: 'ok';
@@ -70,6 +74,10 @@ export interface DeviceResponse {
 
 // Contrat existant, utilisé par l'interface de commandes à partir de V7.5.2.
 export interface SubmitPowerResponse {
+  command: { id: V7Id; state: 'sent' };
+}
+
+export interface SubmitBrightnessResponse {
   command: { id: V7Id; state: 'sent' };
 }
 

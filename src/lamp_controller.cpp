@@ -14,6 +14,10 @@ bool setLampPower(
         return false;
     }
     lamp.state.power = state;
+    if (lampHardwareSupportsBrightness()) {
+        lamp.state.brightness = state
+            ? lamp.state.lastNonzeroBrightness : 0;
+    }
 
     Serial.print("Power -> ");
     Serial.println(
@@ -23,20 +27,30 @@ bool setLampPower(
 }
 
 
-void setLampBrightness(
+bool setLampBrightness(
     Lamp& lamp,
     int32_t brightness
 ) {
-    const int32_t clampedBrightness =
-        brightness < 0
-            ? 0
-            : (brightness > 100 ? 100 : brightness);
+    if (brightness < 0 || brightness > 100 ||
+        !lampHardwareSupportsBrightness()) {
+        Serial.println("[LAMP] brightness command rejected: unsupported or out of range");
+        return false;
+    }
+    if (!writeLampHardwareBrightness(static_cast<uint8_t>(brightness))) {
+        Serial.println("[LAMP] PWM brightness write failed");
+        return false;
+    }
 
-    lamp.state.brightness = static_cast<uint8_t>(clampedBrightness);
+    lamp.state.brightness = static_cast<uint8_t>(brightness);
+    lamp.state.power = brightness != 0;
+    if (brightness != 0) {
+        lamp.state.lastNonzeroBrightness = static_cast<uint8_t>(brightness);
+    }
 
     Serial.print("Brightness -> ");
-    Serial.print(clampedBrightness);
+    Serial.print(brightness);
     Serial.println("%");
+    return true;
 }
 
 

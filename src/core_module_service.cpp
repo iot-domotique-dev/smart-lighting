@@ -84,6 +84,19 @@ CoreModuleUpdateResult ingestCoreModuleAnnouncement(
         updated.lastConfirmedPower = existing->lastConfirmedPower;
         updated.lastConfirmedPowerStatus = existing->lastConfirmedPowerStatus;
         updated.powerExecutionUnknown = existing->powerExecutionUnknown;
+        updated.lastConfirmedBrightness = existing->lastConfirmedBrightness;
+        updated.lastConfirmedBrightnessStatus =
+            existing->lastConfirmedBrightnessStatus;
+        updated.lastConfirmedNonzeroBrightness =
+            existing->lastConfirmedNonzeroBrightness;
+        updated.lastConfirmedNonzeroBrightnessKnown =
+            existing->lastConfirmedNonzeroBrightnessKnown;
+        updated.brightnessExecutionUnknown =
+            existing->brightnessExecutionUnknown;
+        if (hasDeviceCapability(*existing, DEVICE_CAP_BRIGHTNESS) &&
+            !hasDeviceCapability(updated, DEVICE_CAP_BRIGHTNESS)) {
+            markLastConfirmedBrightnessStale(updated);
+        }
         if (!updateDevice(registry, updated)) {
             return CoreModuleUpdateResult::IDENTITY_CONFLICT;
         }

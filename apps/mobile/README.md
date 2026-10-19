@@ -1,6 +1,6 @@
-# Smart Lighting Mobile — V7.7.3
+# Smart Lighting Mobile — V7.8.0
 
-Application Expo SDK 57 / React Native / TypeScript pour consulter CORE-WIFI, piloter les lampes individuellement en ON/OFF, les ajouter et les retirer depuis Android/iOS avec les API V7 existantes.
+Application Expo SDK 57 / React Native / TypeScript pour consulter CORE-WIFI, piloter les lampes individuellement en ON/OFF et en luminosité, les ajouter et les retirer depuis Android/iOS avec les API V7 existantes.
 
 Le parcours d’ajout V7.6.4 et son résultat matériel rapporté sont dans le [dossier V7.6](../../docs/V7_6_PAIRING.md). Le protocole de retrait du firmware V7.7.2 et son état de validation sont dans le [dossier V7.7](../../docs/V7_7_UNPAIRING.md). Le dossier [V7.5](../../docs/V7_5_MOBILE_APP.md) décrit la consultation et les commandes ON/OFF.
 
@@ -43,17 +43,25 @@ Le premier build crée les dossiers natifs ignorés par Git. Le réglage Android
 
 L’actualisation automatique se fait toutes les 20 secondes pendant que l’application est active. Chaque requête a un délai de 5 secondes. En cas de perte réseau, la dernière liste reste visible avec un avertissement ; elle n’est plus présentée comme une disponibilité actuelle.
 
-`last_confirmed_state` décrit la dernière commande ON/OFF confirmée par ACK : `unknown`, `confirmed` ou `stale`. Il ne mesure pas l’état électrique de la lampe. Une lampe hors ligne peut conserver un historique `stale`. Le champ API existant `state:null` reste inchangé.
+`last_confirmed_state` décrit les dernières consignes ON/OFF et brightness confirmées par ACK : `unknown`, `confirmed` ou `stale`. La propriété brightness peut être absente sur un ancien CORE, ou être `null` avec le statut `unknown`. Ces informations ne mesurent pas l’état électrique ni la lumière réellement émise. Une lampe hors ligne peut conserver un historique `stale`. Le champ API existant `state:null` reste inchangé.
 
 ## Piloter les lampes
 
 Chaque carte propose **Allumer** et **Éteindre**. Un seul POST est envoyé par appui à `/devices/{id}/commands/power`; en cas de perte de réponse, l’application affiche un résultat incertain et ne renvoie jamais automatiquement ce POST. Elle conserve l’ID, la lampe, la demande et les états de suivi en mémoire pendant l’exécution.
 
+Les lampes qui annoncent la capacité `brightness` affichent aussi **Luminosité**, avec un curseur entier de 0 à 100. Il reste visible hors ligne, mais devient inactif si la lampe ou son MAIN est indisponible, si les données sont anciennes, si un retrait bloque la lampe ou si une commande de sortie est active. Les lampes sans cette capacité gardent les commandes ON/OFF sans curseur. Le curseur affiche la sélection locale séparément du dernier niveau confirmé; `unknown` reste inconnu au lieu d’être remplacé par une valeur supposée. `stale` est affiché comme historique à vérifier.
+
+Pendant le glissement, seule la sélection locale change. Un seul POST à `/devices/{id}/commands/brightness` avec `{"percent": n}` est envoyé au relâchement, si la valeur a changé et qu’elle n’est pas déjà la consigne confirmée. Aucun POST n’est envoyé à chaque mouvement. `0 %` applique la sémantique OFF du firmware; `1–100 %` applique une consigne ON. L’application n’envoie jamais un ON/OFF additionnel avec brightness.
+
 Après HTTP `202`, le client suit `/commands/{id}` avec un délai progressif, jusqu’à `executed`, `failed`, `expired` ou un délai mobile maximal de 30 secondes. `sent` et `accepted` restent en cours. Après un état terminal, la fiche lampe est relue depuis `/devices/{id}`. L’affichage ON/OFF reste fondé sur `last_confirmed_state` et n’est jamais modifié optimistement par l’appui.
 
-Une commande en cours désactive les deux boutons de cette lampe; une autre lampe reste pilotable en parallèle. Les boutons sont également désactivés si la lampe, son MAIN ou la fraîcheur de l’inventaire ne permettent pas de confirmer sa disponibilité. Modifier l’adresse ou le jeton CORE attend la fin du suivi. Le retour au premier plan reprend les lectures de statut. Après fermeture complète de l’application ou redémarrage du CORE, le résultat peut rester inconnu; aucune nouvelle commande n’est rejouée automatiquement.
+Les commandes ON/OFF et brightness partagent le même verrou par lampe : aucune seconde commande de sortie ne peut être envoyée pendant un suivi ou tant qu’un résultat incertain doit être relu. Une autre lampe reste pilotable en parallèle. Modifier l’adresse ou le jeton CORE attend la fin du suivi. Le retour au premier plan reprend les lectures de statut. Après fermeture complète de l’application ou redémarrage du CORE, le résultat peut rester inconnu; aucune nouvelle commande n’est rejouée automatiquement.
 
-`executed` confirme l’exécution logicielle par ACK, pas un état électrique mesuré. `expired`, `command_not_found`, une réponse POST perdue et un délai de suivi sont présentés comme incertains; l’application relit l’état connu, sans prétendre prouver quelle commande l’a produit.
+`sent` et `accepted` restent en cours; seul `executed` confirme l’exécution logicielle par ACK. Après cet ACK, l’application relit le détail de la lampe et son `last_confirmed_state`. `failed`, `expired`, `command_not_found`, une réponse POST perdue et un délai de suivi ne sont jamais présentés comme une réussite. Le client relit l’état par GET, puis permet une nouvelle action explicite seulement après cette réconciliation; il ne répète jamais le POST perdu. `executed` confirme une consigne firmware, pas l’état électrique ni l’intensité lumineuse réellement mesurée.
+
+La consigne brightness n’est conservée qu’en RAM par le firmware LAMP. Après un redémarrage à froid de LAMP, l’application ne suppose pas que le niveau antérieur a été restauré; elle affiche les valeurs et statuts réellement fournis par CORE.
+
+Le Slider natif est fourni par `@react-native-community/slider` 5.2.0, version alignée sur Expo SDK 57. Expo Go SDK 57 inclut ce module; un client de développement ou une application native déjà construite doit être rebâti pour intégrer ce nouveau code natif. L’installation d’une bibliothèque native ne peut pas être mise à jour par un simple rechargement JavaScript.
 
 ## Retirer une lampe — V7.7.3
 
@@ -149,4 +157,12 @@ La migration SDK 57 réduit les avis rapportés par npm, mais `npm audit fix --f
 
 Pour V7.6.4, `npm run typecheck`, `npm run lint`, les **34/34 tests simulés**, `npx expo install --check` et `npx expo export --platform android` ont réussi après alignement des patchs `expo` et `expo-dev-client` sur SDK 57. L’environnement de vérification utilisait Node 20.19 et npm a signalé `EBADENGINE`; le projet et Expo SDK 57 demandent Node 22.13 ou plus récent.
 
-Pour V7.7.3, `npm run lint`, `npm run typecheck`, les **56/56 tests simulés** et `npx expo export --platform android` réussissent. `npx expo install --check` signale que la dépendance `expo@57.0.28` est un patch en dessous de `~57.0.29`; elle n’a pas été mise à jour dans cette étape. Node 20.19.4 a été utilisé alors que le projet demande Node 22.13 ou plus récent. L’export Android vérifie le bundling JavaScript, pas l’installation native, le comportement sur téléphone ou le firmware.
+Pour V7.7.3, `npm run lint`, `npm run typecheck`, les **56/56 tests simulés** et `npx expo export --platform android` avaient réussi. `npx expo install --check` signalait que `expo@57.0.28` était un patch en dessous de `~57.0.29`; cette dépendance n’a pas été mise à jour dans V7.8.0. Node 20.19.4 est utilisé ici alors que le projet demande Node 22.13 ou plus récent. L’export Android vérifie le bundling JavaScript, pas l’installation native, le comportement sur téléphone ou le firmware.
+
+Pour le candidat V7.8.0, les résultats consignés sont : `npm run test:api` (**69/69**), `npm run typecheck`, `npm run lint`, `npx expo install --check` et `npx expo export --platform android` réussis. Le contrôle Expo a utilisé la table locale faute de réseau; la dépendance déclarée reste `~57.0.28`, donc l’écart déjà relevé avec `~57.0.29` n’a pas été tranché avec le registre en ligne. Node 20.19.4 a affiché `EBADENGINE`; le projet demande Node 22.13 ou plus récent. Le prébuild Android a échoué dans l’environnement de travail lors de la création du cache d’icônes; aucun SDK Android local n’était installé, donc aucun APK Gradle natif n’a été compilé. Ces vérifications logicielles ne remplacent pas l’essai matériel.
+
+### Validation matérielle rapportée — 16 octobre 2026
+
+L’utilisateur confirme le pilotage de la luminosité depuis Android jusqu’à la LED physique de test sur GPIO18. Le trajet a utilisé l’API HTTP locale, UART, Zigbee et le profil unique `lamp_c6` avec LEDC. Le montage est une LED basse tension avec résistance série de 220 Ω; cette sortie ne convient pas à une lampe secteur ou à une charge de puissance. L’essai couvre un MAIN et une LAMP.
+
+La validation V7.7 antérieure, le 15 octobre, couvre l’ajout/appairage, ON/OFF, le retrait depuis l’application, le réappairage et la persistance. Ces parcours n’ont pas été répétés pendant l’essai PWM V7.8.0. Plusieurs lampes pilotées simultanément, les scénarios de panne/récupération et la persistance de la luminosité après redémarrage à froid de LAMP ne sont pas validés. La luminosité reste en RAM et n’est pas persistée en NVS.

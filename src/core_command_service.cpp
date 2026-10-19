@@ -4,9 +4,10 @@
 #include "message_id_generator.h"
 
 namespace {
-bool isTrackedPowerCommand(const Message& message) {
+bool isTrackedOutputCommand(const Message& message) {
     return isCoreCommandMessage(message) &&
-        message.commandType == static_cast<int32_t>(ActionType::SET_LAMP_POWER);
+        (message.commandType == static_cast<int32_t>(ActionType::SET_LAMP_POWER) ||
+         message.commandType == static_cast<int32_t>(ActionType::SET_LAMP_BRIGHTNESS));
 }
 
 bool sameLampIdentity(const Device& device, const Message& command) {
@@ -14,6 +15,73 @@ bool sameLampIdentity(const Device& device, const Message& command) {
         device.id == command.destinationId &&
         device.parentId == command.parentMainId &&
         device.localId == command.provisioningDeviceId;
+}
+
+bool outputExecutionUnknown(const Device& lamp) {
+    return lamp.powerExecutionUnknown || lamp.brightnessExecutionUnknown;
+}
+
+bool deviceOnline(const Device& device) {
+    return device.status == DeviceStatus::ONLINE;
+}
+
+void markOutputExecutionUnknown(Device& lamp) {
+    lamp.powerExecutionUnknown = true;
+    lamp.brightnessExecutionUnknown = true;
+    markLastConfirmedOutputStale(lamp);
+}
+
+bool hasPendingOutput(const MessageTracker& tracker, uint32_t destinationId) {
+    for (uint8_t index = 0; index < tracker.count; ++index) {
+        const PendingMessage& pending = tracker.messages[index];
+        if (pending.waitingForAck && isTrackedOutputCommand(pending.message) &&
+            pending.message.destinationId == destinationId) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool applyConfirmedOutput(Device& lamp, const Message& command) {
+    const bool isBrightness = command.commandType ==
+        static_cast<int32_t>(ActionType::SET_LAMP_BRIGHTNESS);
+    if (isBrightness) {
+        lamp.lastConfirmedBrightness = static_cast<uint8_t>(command.value);
+        lamp.lastConfirmedBrightnessStatus = deviceOnline(lamp)
+            ? LastConfirmedBrightnessStatus::CONFIRMED
+            : LastConfirmedBrightnessStatus::STALE;
+        if (command.value > 0) {
+            lamp.lastConfirmedNonzeroBrightness =
+                static_cast<uint8_t>(command.value);
+            lamp.lastConfirmedNonzeroBrightnessKnown = true;
+        }
+        lamp.lastConfirmedPower = command.value == 0
+            ? LastConfirmedPower::OFF : LastConfirmedPower::ON;
+    } else {
+        lamp.lastConfirmedPower = command.value == 0
+            ? LastConfirmedPower::OFF : LastConfirmedPower::ON;
+        if (hasDeviceCapability(lamp, DEVICE_CAP_BRIGHTNESS)) {
+            if (command.value == 0) {
+                lamp.lastConfirmedBrightness = 0;
+                lamp.lastConfirmedBrightnessStatus = deviceOnline(lamp)
+                    ? LastConfirmedBrightnessStatus::CONFIRMED
+                    : LastConfirmedBrightnessStatus::STALE;
+            } else if (lamp.lastConfirmedNonzeroBrightnessKnown) {
+                lamp.lastConfirmedBrightness = lamp.lastConfirmedNonzeroBrightness;
+                lamp.lastConfirmedBrightnessStatus = deviceOnline(lamp)
+                    ? LastConfirmedBrightnessStatus::CONFIRMED
+                    : LastConfirmedBrightnessStatus::STALE;
+            } else {
+                lamp.lastConfirmedBrightness = 0;
+                lamp.lastConfirmedBrightnessStatus =
+                    LastConfirmedBrightnessStatus::UNKNOWN;
+            }
+        }
+    }
+    lamp.lastConfirmedPowerStatus = deviceOnline(lamp)
+        ? LastConfirmedPowerStatus::CONFIRMED
+        : LastConfirmedPowerStatus::STALE;
+    return true;
 }
 }  // namespace
 
@@ -23,7 +91,28 @@ CoreCommandService::CoreCommandService(DeviceRegistry& devices,
 
 CoreCommandError CoreCommandService::submitPower(uint32_t destinationId,
     bool power, uint32_t& messageId, uint32_t requestedId) {
+    return submitOutputCommand(destinationId,
+        static_cast<int32_t>(ActionType::SET_LAMP_POWER), power ? 1 : 0,
+        messageId, requestedId);
+}
+
+CoreCommandError CoreCommandService::submitBrightness(uint32_t destinationId,
+    int32_t percent, uint32_t& messageId, uint32_t requestedId) {
+    return submitOutputCommand(destinationId,
+        static_cast<int32_t>(ActionType::SET_LAMP_BRIGHTNESS), percent,
+        messageId, requestedId);
+}
+
+CoreCommandError CoreCommandService::submitOutputCommand(uint32_t destinationId,
+    int32_t commandType, int32_t value, uint32_t& messageId,
+    uint32_t requestedId) {
     messageId = 0;
+    if ((commandType == static_cast<int32_t>(ActionType::SET_LAMP_POWER) &&
+         value != 0 && value != 1) ||
+        (commandType == static_cast<int32_t>(ActionType::SET_LAMP_BRIGHTNESS) &&
+         (value < 0 || value > 100))) {
+        return CoreCommandError::INVALID_COMMAND;
+    }
     const Device* lamp = findDeviceById(registry, destinationId);
     if (lamp == nullptr || lamp->role != DeviceRole::LAMP)
         return CoreCommandError::UNKNOWN_DESTINATION;
@@ -33,6 +122,10 @@ CoreCommandError CoreCommandService::submitPower(uint32_t destinationId,
         main->id != makeCoreModuleId(CORE_LOGICAL_ID, main->localId) ||
         lamp->id != makeCoreModuleId(main->id, lamp->localId))
         return CoreCommandError::INVALID_ROUTE;
+    if (commandType == static_cast<int32_t>(ActionType::SET_LAMP_BRIGHTNESS) &&
+        !hasDeviceCapability(*lamp, DEVICE_CAP_BRIGHTNESS)) {
+        return CoreCommandError::UNSUPPORTED_CAPABILITY;
+    }
     if (lamp->status != DeviceStatus::ONLINE || main->status != DeviceStatus::ONLINE)
         return CoreCommandError::OFFLINE;
     if (link.transport == nullptr || !link.transport->isReady())
@@ -42,22 +135,16 @@ CoreCommandError CoreCommandService::submitPower(uint32_t destinationId,
     command.sourceId = CORE_LOGICAL_ID;
     command.destinationId = destinationId;
     command.type = MessageType::COMMAND;
-    command.commandType = static_cast<int32_t>(ActionType::SET_LAMP_POWER);
-    command.value = power ? 1 : 0;
+    command.commandType = commandType;
+    command.value = value;
     command.timestamp = millis();
     command.parentMainId = main->id;
     command.provisioningDeviceId = lamp->localId;
     if (findPendingMessage(tracker, command.id) != nullptr)
         return CoreCommandError::DUPLICATE_ID;
 
-    bool overlapsSameLampCommand = false;
-    for (uint8_t index = 0; index < tracker.count; ++index) {
-        const PendingMessage& pending = tracker.messages[index];
-        if (pending.waitingForAck && isTrackedPowerCommand(pending.message) &&
-            pending.message.destinationId == destinationId) {
-            overlapsSameLampCommand = true;
-        }
-    }
+    if (hasPendingOutput(tracker, destinationId))
+        return CoreCommandError::COMMAND_IN_PROGRESS;
 
     if (!trackMessage(tracker, command)) return CoreCommandError::TRACKER_FULL;
     messageId = command.id;
@@ -70,19 +157,7 @@ CoreCommandError CoreCommandService::submitPower(uint32_t destinationId,
 
     PendingMessage* submitted = findPendingMessage(tracker, command.id);
     if (submitted != nullptr) {
-        submitted->executionOrderAmbiguous = overlapsSameLampCommand ||
-            lamp->powerExecutionUnknown;
-    }
-    if (overlapsSameLampCommand) {
-        for (uint8_t index = 0; index < tracker.count; ++index) {
-            PendingMessage& pending = tracker.messages[index];
-            if (pending.waitingForAck && isTrackedPowerCommand(pending.message) &&
-                pending.message.destinationId == destinationId) {
-                pending.executionOrderAmbiguous = true;
-            }
-        }
-        Device* currentLamp = findDeviceById(registry, destinationId);
-        if (currentLamp != nullptr) markLastConfirmedPowerStale(*currentLamp);
+        submitted->executionOrderAmbiguous = outputExecutionUnknown(*lamp);
     }
     return CoreCommandError::NONE;
 }
@@ -105,44 +180,39 @@ bool CoreCommandService::handleReply(const Message& message) {
         pending->executionOrderAmbiguous;
     if (!processAck(tracker, message)) return false;
 
-    if (!isTrackedPowerCommand(original) ||
+    if (!isTrackedOutputCommand(original) ||
         message.executionStatus != ExecutionStatus::EXECUTED) {
         return true;
     }
 
     Device* lamp = findDeviceById(registry, original.destinationId);
     if (lamp == nullptr || !sameLampIdentity(*lamp, original)) return true;
-    if (executionOrderAmbiguous || lamp->powerExecutionUnknown) {
-        markLastConfirmedPowerStale(*lamp);
+    if (executionOrderAmbiguous || outputExecutionUnknown(*lamp)) {
+        markLastConfirmedOutputStale(*lamp);
         return true;
     }
-
-    lamp->lastConfirmedPower = original.value == 1
-        ? LastConfirmedPower::ON : LastConfirmedPower::OFF;
-    lamp->lastConfirmedPowerStatus = LastConfirmedPowerStatus::CONFIRMED;
+    (void)applyConfirmedOutput(*lamp, original);
     return true;
 }
 
 bool CoreCommandService::hasUnresolvedPowerCommand(uint32_t destinationId) const {
     const Device* lamp = findDeviceById(registry, destinationId);
-    if (lamp == nullptr || lamp->powerExecutionUnknown) return true;
-    for (uint8_t index = 0; index < tracker.count; ++index) {
-        const PendingMessage& pending = tracker.messages[index];
-        if (pending.waitingForAck && isTrackedPowerCommand(pending.message) &&
-            pending.message.destinationId == destinationId) return true;
-    }
-    return false;
+    return lamp == nullptr || outputExecutionUnknown(*lamp) ||
+           hasPendingOutput(tracker, destinationId);
+}
+
+bool CoreCommandService::hasUnresolvedOutputCommand(uint32_t destinationId) const {
+    return hasUnresolvedPowerCommand(destinationId);
 }
 
 void CoreCommandService::poll() {
     (void)updateMessageTimeouts(tracker, link);
     for (uint8_t index = 0; index < tracker.count; ++index) {
         const PendingMessage& pending = tracker.messages[index];
-        if (!pending.timedOut || !isTrackedPowerCommand(pending.message)) continue;
+        if (!pending.timedOut || !isTrackedOutputCommand(pending.message)) continue;
         Device* lamp = findDeviceById(registry, pending.message.destinationId);
         if (lamp == nullptr || !sameLampIdentity(*lamp, pending.message)) continue;
-        lamp->powerExecutionUnknown = true;
-        markLastConfirmedPowerStale(*lamp);
+        markOutputExecutionUnknown(*lamp);
     }
 }
 
@@ -157,7 +227,7 @@ void CoreCommandBridge::setMain(uint32_t localId, uint32_t globalId) {
 bool CoreCommandBridge::handleFromCore(const Message& message) {
     if (!isCoreCommandMessage(message)) return false;
     CoreCommandError error = CoreCommandError::NONE;
-    if (!validCorePowerCommand(message)) error = CoreCommandError::INVALID_COMMAND;
+    if (!validCoreOutputCommand(message)) error = CoreCommandError::INVALID_COMMAND;
     else if (mainLocalId == 0 || mainCoreId == 0 || message.parentMainId != mainCoreId)
         error = CoreCommandError::INVALID_ROUTE;
     else if (!sendMessageVia(zigbee, message, mainLocalId))
@@ -199,7 +269,7 @@ bool MainCommandRelay::handleMessage(const Message& message) {
     if (!isCoreCommandMessage(message)) return false;
     CoreCommandError error = CoreCommandError::NONE;
     Lamp* lamp = findLamp(lamps, message.provisioningDeviceId);
-    if (!validCorePowerCommand(message)) error = CoreCommandError::INVALID_COMMAND;
+    if (!validCoreOutputCommand(message)) error = CoreCommandError::INVALID_COMMAND;
     else if (mainCoreId == 0 || message.parentMainId != mainCoreId)
         error = CoreCommandError::INVALID_ROUTE;
     else if (lamp == nullptr) error = CoreCommandError::UNKNOWN_DESTINATION;
@@ -209,6 +279,10 @@ bool MainCommandRelay::handleMessage(const Message& message) {
         error = CoreCommandError::INVALID_ROUTE;
     else if (lamp->identity.removalPending)
         error = CoreCommandError::REMOVAL_IN_PROGRESS;
+    else if (message.commandType ==
+                 static_cast<int32_t>(ActionType::SET_LAMP_BRIGHTNESS) &&
+             !hasDeviceCapability(lamp->device, DEVICE_CAP_BRIGHTNESS))
+        error = CoreCommandError::UNSUPPORTED_CAPABILITY;
     else if (lamp->device.status != DeviceStatus::ONLINE) error = CoreCommandError::OFFLINE;
     if (error == CoreCommandError::NONE) {
         // Acceptance is non-terminal. Each retry reaches the LAMP cache again.

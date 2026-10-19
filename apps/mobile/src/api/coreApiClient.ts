@@ -2,6 +2,7 @@ import type {
   CoreResponse,
   CommandState,
   CommandStatusResponse,
+  ConfirmedValueStatus,
   DeviceRecord,
   DeviceResponse,
   DevicesResponse,
@@ -22,6 +23,7 @@ import type {
   RemovalOperationState,
   RemovalOperationSubmissionResponse,
   SubmitPowerResponse,
+  SubmitBrightnessResponse,
   V7Id,
 } from './types';
 
@@ -62,9 +64,22 @@ function isDeviceBase(value: unknown): value is DeviceRecord {
 function isLamp(value: DeviceRecord): value is LampRecord {
   if (value.role !== 'lamp' || !isRecord(value.last_confirmed_state)) return false;
   const state = value.last_confirmed_state;
-  return (state.status === 'unknown' && state.power === null) ||
+  const validStatus = (status: unknown): status is ConfirmedValueStatus =>
+    status === 'unknown' || status === 'confirmed' || status === 'stale';
+  const validPower = (state.status === 'unknown' && state.power === null) ||
     ((state.status === 'confirmed' || state.status === 'stale') &&
       (state.power === 'on' || state.power === 'off'));
+  if (!validStatus(state.status) || !validPower) return false;
+
+  const hasBrightnessPercent = 'brightness_percent' in state;
+  const hasBrightnessStatus = 'brightness_status' in state;
+  if (!hasBrightnessPercent && !hasBrightnessStatus) return true;
+  if (!hasBrightnessPercent || !hasBrightnessStatus ||
+      !validStatus(state.brightness_status)) return false;
+  const percent = state.brightness_percent;
+  if (state.brightness_status === 'unknown') return percent === null;
+  return typeof percent === 'number' && Number.isInteger(percent) &&
+    percent >= 0 && percent <= 100;
 }
 
 function isDevice(value: unknown): value is DeviceRecord {
@@ -203,6 +218,23 @@ export async function submitPower(ip: string, id: V7Id, state: PowerState, token
       'Réponse de commande inattendue : vérifiez son résultat avant tout nouvel envoi.');
   }
   return body as unknown as SubmitPowerResponse;
+}
+
+export async function submitBrightness(ip: string, id: V7Id, percent: number, token: string,
+  signal?: AbortSignal): Promise<SubmitBrightnessResponse> {
+  if (!isV7Id(id) || !Number.isInteger(percent) || percent < 0 || percent > 100) {
+    return invalidResponse();
+  }
+  const { body, status } = await requestJson(ip,
+    `/devices/${id}/commands/brightness`, {
+      method: 'POST', token, body: JSON.stringify({ percent }), signal,
+    });
+  if (status !== 202 || !isRecord(body) || !isRecord(body.command) ||
+      !isV7Id(body.command.id) || body.command.state !== 'sent') {
+    throw new CoreApiError('submission_uncertain',
+      'Réponse de commande inattendue : vérifiez son résultat avant tout nouvel envoi.');
+  }
+  return body as unknown as SubmitBrightnessResponse;
 }
 
 const COMMAND_STATES: readonly CommandState[] =

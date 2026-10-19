@@ -169,6 +169,11 @@ void setup() {
         CORE_LOGICAL_ID,
         LastConfirmedPower::UNKNOWN,
         LastConfirmedPowerStatus::UNKNOWN,
+        false,
+        0,
+        LastConfirmedBrightnessStatus::UNKNOWN,
+        0,
+        false,
         false
     };
     if (!registerDevice(coreDeviceRegistry, coreDevice)) {

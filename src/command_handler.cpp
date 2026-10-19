@@ -22,10 +22,13 @@ bool executeCommand(
                 "SET_POWER"
             );
 
-            setLampPower(
+            if (!setLampPower(
                 lamp,
                 command.value != 0
-            );
+            )) {
+                command.status = CommandStatus::FAILED;
+                return false;
+            }
 
             command.status =
                 CommandStatus::EXECUTED;
@@ -39,10 +42,13 @@ bool executeCommand(
                 "SET_BRIGHTNESS"
             );
 
-            setLampBrightness(
+            if (!setLampBrightness(
                 lamp,
                 command.value
-            );
+            )) {
+                command.status = CommandStatus::FAILED;
+                return false;
+            }
 
             command.status =
                 CommandStatus::EXECUTED;

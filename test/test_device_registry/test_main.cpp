@@ -297,6 +297,12 @@ void test_registry_reinitialization_discards_confirmed_power_history() {
     stored->lastConfirmedPower = LastConfirmedPower::ON;
     stored->lastConfirmedPowerStatus = LastConfirmedPowerStatus::CONFIRMED;
     stored->powerExecutionUnknown = true;
+    stored->lastConfirmedBrightness = 48;
+    stored->lastConfirmedBrightnessStatus =
+        LastConfirmedBrightnessStatus::CONFIRMED;
+    stored->lastConfirmedNonzeroBrightness = 48;
+    stored->lastConfirmedNonzeroBrightnessKnown = true;
+    stored->brightnessExecutionUnknown = true;
 
     // CORE startup calls initDeviceRegistry; rediscovery must start unknown.
     initDeviceRegistry(registry);
@@ -310,6 +316,11 @@ void test_registry_reinitialization_discards_confirmed_power_history() {
     TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::UNKNOWN),
                           static_cast<int>(stored->lastConfirmedPowerStatus));
     TEST_ASSERT_FALSE(stored->powerExecutionUnknown);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(LastConfirmedBrightnessStatus::UNKNOWN),
+        static_cast<int>(stored->lastConfirmedBrightnessStatus));
+    TEST_ASSERT_FALSE(stored->lastConfirmedNonzeroBrightnessKnown);
+    TEST_ASSERT_FALSE(stored->brightnessExecutionUnknown);
 }
 
 int main(int, char**) {

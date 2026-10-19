@@ -9,6 +9,7 @@ import type { HealthResponse, LampRecord, ModuleRecord, PowerState,
 import { StatusIndicator } from '../../components/StatusIndicator';
 import { LampCard } from './LampCard';
 import type { LampCommandFeedback } from './commandPolling';
+import { brightnessDisplay } from './brightnessControl';
 import { PairingScreen } from '../pairing/PairingScreen';
 import { acquireRemovalAction, canRequestRemoval, createRemovalConfirmation,
   createRemovalOperationId, isCommandBlockingRemoval,
@@ -44,12 +45,15 @@ interface Snapshot {
   receivedAt: number;
 }
 
-export function LampListScreen({ ip, token, onSettings, commandFeedback, onPower }: {
+export function LampListScreen({ ip, token, onSettings, commandFeedback, onPower,
+  onBrightness, onReconcile }: {
   ip: string;
   token: string;
   onSettings: () => void;
   commandFeedback: Record<string, LampCommandFeedback>;
   onPower: (lampId: V7Id, state: PowerState) => Promise<LampRecord | null>;
+  onBrightness: (lampId: V7Id, percent: number) => Promise<LampRecord | null>;
+  onReconcile: (lampId: V7Id) => Promise<LampRecord | null>;
 }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [coreReachable, setCoreReachable] = useState<boolean | null>(null);
@@ -70,6 +74,8 @@ export function LampListScreen({ ip, token, onSettings, commandFeedback, onPower
   const [removalStorageError, setRemovalStorageError] = useState('');
   const requestVersion = useRef(0);
   const detailVersion = useRef(0);
+  const lampRevisions = useRef(new Map<V7Id, number>());
+  const revisionCounter = useRef(0);
   const screenMounted = useRef(true);
   const removalRef = useRef<PendingRemovalOperation | null>(null);
   const removalStartLock = useRef({ active: false });
@@ -78,6 +84,7 @@ export function LampListScreen({ ip, token, onSettings, commandFeedback, onPower
 
   const refresh = useCallback(async (manual = false) => {
     const version = ++requestVersion.current;
+    const revisionsAtStart = new Map(lampRevisions.current);
     if (manual) setRefreshing(true);
     try {
       const [health, modules, devices] = await Promise.allSettled([
@@ -87,8 +94,14 @@ export function LampListScreen({ ip, token, onSettings, commandFeedback, onPower
       setCoreReachable([health, modules, devices].some((result) => result.status === 'fulfilled'));
       if (health.status === 'fulfilled' && modules.status === 'fulfilled' &&
           devices.status === 'fulfilled') {
-        setSnapshot({ health: health.value, modules: modules.value.modules,
-          lamps: lampsOnly(devices.value.devices), receivedAt: Date.now() });
+        const fetchedLamps = lampsOnly(devices.value.devices);
+        setSnapshot((current) => ({ health: health.value, modules: modules.value.modules,
+          lamps: fetchedLamps.map((fetched) => {
+            const revisionNow = lampRevisions.current.get(fetched.id) ?? 0;
+            const revisionAtStart = revisionsAtStart.get(fetched.id) ?? 0;
+            if (revisionNow <= revisionAtStart) return fetched;
+            return current?.lamps.find((lamp) => lamp.id === fetched.id) ?? fetched;
+          }), receivedAt: Date.now() }));
         setError('');
       } else {
         const failure = [health, modules, devices].find(
@@ -468,13 +481,15 @@ export function LampListScreen({ ip, token, onSettings, commandFeedback, onPower
 
   async function openDetail(id: V7Id) {
     const version = ++detailVersion.current;
+    const revisionAtStart = lampRevisions.current.get(id) ?? 0;
     setSelectedId(id);
     setDetail(null);
     setDetailError('');
     setDetailLoading(true);
     try {
       const response = await getDevice(ip, id);
-      if (version !== detailVersion.current) return;
+      if (version !== detailVersion.current ||
+          revisionAtStart !== (lampRevisions.current.get(id) ?? 0)) return;
       const lamp = lampsOnly([response.device])[0];
       if (!lamp) throw new Error('Réponse de lampe inattendue.');
       setDetail(lamp);
@@ -485,10 +500,11 @@ export function LampListScreen({ ip, token, onSettings, commandFeedback, onPower
     }
   }
 
-  async function requestPower(id: V7Id, state: PowerState) {
-    if (isRemovalBlockingCommand(id, removalRef.current?.deviceId)) return;
-    const lamp = await onPower(id, state);
-    if (!lamp || !screenMounted.current || lamp.id !== id) return;
+  function applyLampUpdate(lamp: LampRecord) {
+    const id = lamp.id;
+    if (!screenMounted.current) return;
+    lampRevisions.current.set(id, ++revisionCounter.current);
+    if (selectedId === id) detailVersion.current++;
     setSnapshot((current) => current ? {
       ...current,
       lamps: current.lamps.map((item) => item.id === id ? lamp : item),
@@ -496,6 +512,26 @@ export function LampListScreen({ ip, token, onSettings, commandFeedback, onPower
     } : current);
     setDetail((current) => current?.id === id ? lamp : current);
     if (selectedId === id) setDetailError('');
+  }
+
+  async function requestPower(id: V7Id, state: PowerState) {
+    if (isRemovalBlockingCommand(id, removalRef.current?.deviceId)) return;
+    const lamp = await onPower(id, state);
+    if (!lamp || !screenMounted.current || lamp.id !== id) return;
+    applyLampUpdate(lamp);
+  }
+
+  async function requestBrightness(id: V7Id, percent: number) {
+    if (isRemovalBlockingCommand(id, removalRef.current?.deviceId)) return;
+    const lamp = await onBrightness(id, percent);
+    if (!lamp || !screenMounted.current || lamp.id !== id) return;
+    applyLampUpdate(lamp);
+  }
+
+  async function requestReconcile(id: V7Id) {
+    const lamp = await onReconcile(id);
+    if (!lamp || !screenMounted.current || lamp.id !== id) return;
+    applyLampUpdate(lamp);
   }
 
   function closeDetail() {
@@ -546,6 +582,7 @@ export function LampListScreen({ ip, token, onSettings, commandFeedback, onPower
     storageAvailable: !removalStorageError,
     actionLocked: removalStarting,
   });
+  const detailBrightness = detail ? brightnessDisplay(detail.last_confirmed_state) : null;
 
   return (
     <View style={styles.root}>
@@ -635,6 +672,8 @@ export function LampListScreen({ ip, token, onSettings, commandFeedback, onPower
           powerBlockedByRemoval={isRemovalBlockingCommand(lamp.id, removal?.deviceId) ||
             (removalStarting && selectedId === lamp.id)}
           onPower={(state) => void requestPower(lamp.id, state)}
+          onBrightness={(percent) => void requestBrightness(lamp.id, percent)}
+          onReconcile={() => void requestReconcile(lamp.id)}
           onPress={() => void openDetail(lamp.id)} />)}
         {snapshot ? <Text style={styles.updated}>Dernière lecture · {new Date(snapshot.receivedAt).toLocaleTimeString()}</Text> : null}
         <Text style={styles.footer}>L’état confirmé est mis à jour après ACK et relecture du CORE. Aucune mesure électrique réelle n’est disponible.</Text>
@@ -681,6 +720,11 @@ export function LampListScreen({ ip, token, onSettings, commandFeedback, onPower
               <Text style={styles.detailLine}>Disponibilité : {detail.online ? 'en ligne' : 'hors ligne'}</Text>
               <Text style={styles.detailLine}>Dernier état confirmé : {detail.last_confirmed_state.power?.toUpperCase() ?? 'inconnu'}</Text>
               <Text style={styles.detailLine}>Statut : {detail.last_confirmed_state.status}</Text>
+              {detail.capabilities.includes('brightness') && detailBrightness ? <>
+                <Text style={styles.detailLine}>Luminosité confirmée : {detailBrightness.percent === null ?
+                  'inconnue' : `${detailBrightness.percent} %`}</Text>
+                <Text style={styles.detailLine}>Statut luminosité : {detailBrightness.status}</Text>
+              </> : null}
               <Text style={styles.detailNote}>Historique logiciel reçu du CORE. La lampe ne fournit pas de mesure électrique.</Text>
               <Pressable onPress={() => requestRemovalConfirmation(detail)}
                 disabled={removalActionDisabled}

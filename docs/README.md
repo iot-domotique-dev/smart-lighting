@@ -2,6 +2,8 @@
 
 **V7.7.2/V7.7.3 — clôture nominale, 15 octobre 2026 :** l’utilisateur confirme sur Android et matériel réel la découverte, le nommage, l’appairage, ON/OFF, le retrait depuis l’application, le réappairage avec un nouvel ID V7 et la persistance après redémarrage. Ce résultat couvre un MAIN et une LAMP. Les 119 tests firmware natifs et 56 tests mobiles simulés, lint, typage et export Android avaient réussi. Les scénarios de panne, concurrence et plusieurs lampes simultanées restent hors validation. Voir [le protocole, la persistance, les routes, le client mobile et les limites V7.7](V7_7_UNPAIRING.md).
 
+**V7.8.0 — validation fonctionnelle sur matériel, 16 octobre 2026 :** l’utilisateur confirme le réglage de luminosité depuis Android jusqu’à une LED physique sur GPIO18, via HTTP, UART et Zigbee. Le profil unique `lamp_c6` utilise LEDC et conserve ON/OFF. L’essai porte sur un MAIN et une LAMP. La luminosité n’est pas conservée en NVS après redémarrage à froid de LAMP; multi-lampes simultané et scénarios de panne/récupération ne sont pas validés. L’appairage, le retrait, le réappairage et ON/OFF restent couverts par la validation matérielle nominale V7.7 séparée. Voir [le dossier V7.8](V7_8_BRIGHTNESS.md).
+
 Le [README du dépôt](../README.md) donne l’état du projet et les commandes courantes. Les documents ci-dessous sont les références techniques actives; chaque sujet a une seule page de détail.
 
 **Bilan matériel V7.4.2 du 9 octobre 2026 :** cette version a été validée fonctionnellement sur le montage à quatre ESP32-C6, avec un CORE logique, un MAIN et une LAMP. Les ON/OFF et états HTTP confirmés, les transitions offline/reconnexion et l’expiration avec `execution_unknown` ont été observés sur matériel. À cette étape, 92 tests natifs passaient et les quatre profils C6 compilaient. V7.4.1 couvre le routage de deux lampes en simulation native; le banc matériel ne contenait qu’une lampe. V7.5.1 et V7.5.2 sont documentées, avec un premier essai nominal de commande depuis Android rapporté par l’utilisateur.
@@ -19,6 +21,8 @@ Le [README du dépôt](../README.md) donne l’état du projet et les commandes 
 - [V7.6 — Appairage contrôlé des lampes](V7_6_PAIRING.md) : réservation V7.6.2, sessions pilotées par HTTP, candidates temporaires, ajout depuis l’application V7.6.4, correctif de routage et résultat matériel rapporté.
 - [V7.7 — Désappairage sécurisé](V7_7_UNPAIRING.md) : transaction persistante et réconciliable, migration additive du journal MAIN, routes HTTP, client Android V7.7.3, validation nominale et essais restant à faire.
 
+- [V7.8.0 — variation de luminosité](V7_8_BRIGHTNESS.md) : commande HTTP, suivi des ACK, profil unique `lamp_c6` avec LEDC sur GPIO18 pour le prototype LED basse tension, validation matérielle et limites.
+
 ## Tests
 
 Les suites natives et leur périmètre sont décrits dans le [README des tests](../test/README).
@@ -27,7 +31,7 @@ Les tests natifs couvrent la logique d’appairage/retrait, les codecs et l’AP
 
 ## V7.3 — Commande HTTP locale
 
-La validation V7.3 demeure la référence de l’API de commande locale et de ses erreurs HTTP. Son empreinte de 994 816 octets et sa marge de 53 760 octets sont historiques; la mesure V7.4.2 est dans le [dossier V7.4](V7_4_RELIABILITY.md). L’application mobile est décrite dans le [dossier V7.5](V7_5_MOBILE_APP.md); `SET_BRIGHTNESS` / `SET_AUTOMATIC` restent à planifier.
+La validation V7.3 demeure la référence de l’API de commande locale et de ses erreurs HTTP. Son empreinte de 994 816 octets et sa marge de 53 760 octets sont historiques; la mesure V7.4.2 est dans le [dossier V7.4](V7_4_RELIABILITY.md). L’application mobile est décrite dans le [dossier V7.5](V7_5_MOBILE_APP.md). V7.8.0 ajoute `SET_BRIGHTNESS`; le profil `lamp_c6` est configuré en LEDC pour le prototype LED GPIO18 basse tension. `SET_AUTOMATIC` reste à planifier.
 
 ## Historique
 
