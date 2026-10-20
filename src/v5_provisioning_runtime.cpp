@@ -11,6 +11,7 @@
 #include "message_id_generator.h"
 #include "message_router.h"
 #include "v5_provisioning_runtime.h"
+#include "lamp_controller.h"
 #include "lamp_hardware.h"
 #include "zigbee_transport.h"
 
@@ -49,16 +50,37 @@ bool isProvisioningMessage(MessageType type) {
            type == MessageType::UNPAIR_COMMIT ||
            type == MessageType::UNPAIR_REJECT;
 }
+
+bool sameText(const char* left, const char* right) {
+    return left != nullptr && right != nullptr && strcmp(left, right) == 0;
+}
+
+void makeUnpairReject(const ProvisioningPacket& request,
+                      const ProvisioningPacket& identity,
+                      PairingState state,
+                      ProvisioningPacket& response) {
+    response = {};
+    response.type = ProvisioningPacketType::UNPAIR_REJECT;
+    response.role = DeviceRole::LAMP;
+    response.pairingState = state;
+    response.deviceId = request.deviceId;
+    response.parentMainId = request.parentMainId;
+    response.transactionId = request.transactionId;
+    copyText(response.hardwareId, sizeof(response.hardwareId),
+             identity.hardwareId);
+}
 }  // namespace
 
 V5ProvisioningRuntime::V5ProvisioningRuntime(
     Communication& communicationValue,
     LampRegistry& lampsValue,
-    MessageTracker& trackerValue
+    MessageTracker& trackerValue,
+    MessageDeduplicator& deduplicatorValue
 )
     : communication(communicationValue),
       lamps(lampsValue),
       tracker(trackerValue),
+      deduplicator(deduplicatorValue),
       role(DeviceRole::LAMP),
       lampStore(nullptr),
       reservationStore(nullptr),
@@ -752,8 +774,53 @@ bool V5ProvisioningRuntime::dispatch(const Message& message) {
             return true;
         }
         if (packet.type == ProvisioningPacketType::UNPAIR_REQUEST) {
+            const ProvisioningPacket identity = lampPairing->announce();
+            const bool exactRemoval = packet.role == DeviceRole::MAIN &&
+                packet.pairingState == PairingState::UNPAIRING &&
+                packet.transactionId != 0 && packet.deviceId != 0 &&
+                packet.parentMainId != 0 &&
+                packet.sourceId == packet.parentMainId &&
+                packet.destinationId == packet.deviceId &&
+                sameText(packet.hardwareId, identity.hardwareId) &&
+                packet.deviceId == identity.deviceId &&
+                packet.parentMainId == identity.parentMainId &&
+                (identity.pairingState == PairingState::PAIRED ||
+                 (identity.pairingState == PairingState::UNPAIRING &&
+                  packet.transactionId == identity.transactionId));
+            Lamp* localLamp = exactRemoval
+                ? findLamp(lamps, packet.deviceId) : nullptr;
+            const bool localIdentityMatches = localLamp == nullptr ||
+                (sameText(localLamp->identity.hardwareId, packet.hardwareId) &&
+                 localLamp->identity.parentMainId == packet.parentMainId);
             ProvisioningPacket response = {};
-            const bool accepted = lampPairing->handleUnpairRequest(packet, response);
+            bool outputOff = false;
+            LampOutputInterruption interruption = {};
+            if (exactRemoval && localIdentityMatches) {
+                if (localLamp != nullptr) {
+                    outputOff = forceLampOutputOff(*localLamp, millis(),
+                        interruption) == LampOutputOffResult::APPLIED;
+                    if (interruption.hadTransition &&
+                        (interruption.transitionStopped ||
+                         interruption.transitionCompleted)) {
+                        finishLampOutputTransition(communication, deduplicator,
+                            *localLamp, interruption.transition,
+                            interruption.transitionCompleted
+                                ? ExecutionStatus::EXECUTED
+                                : ExecutionStatus::FAILED);
+                    }
+                } else {
+                    // A rebooted lamp may retain an idempotent removal receipt
+                    // without restoring its DeviceRegistry entry. Re-assert OFF
+                    // before replaying that receipt.
+                    outputOff = writeLampHardwarePower(false, 100);
+                }
+            }
+            const bool accepted = outputOff &&
+                lampPairing->handleUnpairRequest(packet, response);
+            if (!accepted && response.type !=
+                    ProvisioningPacketType::UNPAIR_REJECT) {
+                makeUnpairReject(packet, identity, lampPairing->state(), response);
+            }
             if (accepted && response.type == ProvisioningPacketType::UNPAIR_CONFIRM) {
                 (void)removeLamp(lamps, response.deviceId);
                 (void)sendPacket(response, response.deviceId,
@@ -809,6 +876,9 @@ void V5ProvisioningRuntime::restoreLocalLamp() {
     local.device.lastSeen = millis();
     local.device.capabilities = identity.capabilities;
     local.state = {false, 0, false};
+    if (lampStore != nullptr) {
+        restoreLampSettings(local, *lampStore);
+    }
     copyText(local.identity.hardwareId, sizeof(local.identity.hardwareId),
              identity.hardwareId);
     copyText(local.identity.name, sizeof(local.identity.name), identity.name);

@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include "device.h"
 
+class ProvisioningStore;
+
 
 struct LampState {
 
@@ -12,7 +14,7 @@ struct LampState {
 
     bool automatic;
 
-    /* Default applied after a cold start; not persisted to NVS. */
+    /* Persisted last positive level, or 100% when absent/invalid. */
     uint8_t lastNonzeroBrightness = 100;
 
 };
@@ -37,6 +39,30 @@ struct LampIdentity {
     bool removalPending;
 };
 
+/* Runtime-only identity for the one output transition currently run by LAMP. */
+struct LampOutputTransition {
+    bool active = false;
+    bool faulted = false;
+    bool coreCommand = false;
+    bool dropAck = false;
+    bool targetPower = false;
+    uint8_t targetBrightness = 0;
+    uint8_t previousBrightness = 0;
+    uint32_t startedAt = 0;
+    uint32_t timeoutMs = 0;
+    uint32_t completionSequence = 0;
+    uint32_t generation = 0;
+    uint32_t sourceId = 0;
+    uint32_t messageId = 0;
+};
+
+struct LampOutputInterruption {
+    LampOutputTransition transition = {};
+    bool hadTransition = false;
+    bool transitionCompleted = false;
+    bool transitionStopped = false;
+};
+
 
 struct Lamp {
 
@@ -45,5 +71,13 @@ struct Lamp {
     LampState state;
 
     LampIdentity identity;
+
+    /* Non-owning handle to this physical LAMP's existing provisioning store. */
+    ProvisioningStore* settingsStore = nullptr;
+
+    LampOutputTransition outputTransition;
+
+    /* Local generation invalidates any completion event from an older fade. */
+    uint32_t outputGeneration = 0;
 
 };

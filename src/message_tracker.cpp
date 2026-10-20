@@ -62,6 +62,8 @@ void initMessageTracker(
             false;
 
         tracker.messages[i].executionOrderAmbiguous = false;
+        tracker.messages[i].priorityOff = false;
+        tracker.messages[i].supersededByPriorityOff = false;
 
         tracker.messages[i].retryCount =
             0;
@@ -147,6 +149,8 @@ bool trackMessage(
         false;
 
     pending.executionOrderAmbiguous = false;
+    pending.priorityOff = false;
+    pending.supersededByPriorityOff = false;
 
     pending.retryCount =
         0;
@@ -375,6 +379,14 @@ bool updateMessageTimeouts(
         const bool coreDeadlineExpired = isCoreTrackedCommand(pending.message) &&
             now - pending.firstSentAt >=
                 MESSAGE_TIMEOUT * (static_cast<uint32_t>(MAX_MESSAGE_RETRIES) + 1);
+
+        // Once a priority OFF is on the wire, replaying the older output
+        // request could deliver it after OFF. Keep tracking its ACK/deadline,
+        // but let the same-ID OFF retry path own recovery.
+        if (isCoreTrackedCommand(pending.message) &&
+            pending.supersededByPriorityOff && !coreDeadlineExpired) {
+            continue;
+        }
 
 
         if (

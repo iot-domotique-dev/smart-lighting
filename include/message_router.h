@@ -31,3 +31,19 @@ void processMessages(
     bool dropNextAck = false,
     EventBus* eventBus = nullptr
 );
+
+/* Consumes LEDC completion events and sends terminal output ACKs from loop(). */
+void pollLampTransitions(
+    Communication& communication,
+    MessageDeduplicator& deduplicator,
+    LampRegistry& lamps
+);
+
+/* Sends the terminal result for a fade stopped by OFF or a secure unpair. */
+void finishLampOutputTransition(
+    Communication& communication,
+    MessageDeduplicator& deduplicator,
+    Lamp& lamp,
+    const LampOutputTransition& transition,
+    ExecutionStatus result
+);

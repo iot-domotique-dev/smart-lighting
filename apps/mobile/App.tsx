@@ -6,7 +6,9 @@ import { CoreApiError, describeApiError, describeCommandFailure, getCommand,
 import type { LampRecord, PowerState, V7Id } from './src/api/types';
 import { ConnectionScreen } from './src/features/core/ConnectionScreen';
 import { LampListScreen } from './src/features/lighting/LampListScreen';
-import { acquireLampCommand, isCommandInProgress, pollCommand, releaseLampCommand } from './src/features/lighting/commandPolling';
+import { acquireLampCommand, canInterruptWithPriorityOff, isCommandInProgress,
+  isCurrentLampCommand,
+  pollCommand, releaseLampCommand } from './src/features/lighting/commandPolling';
 import type { LampCommandFeedback } from './src/features/lighting/commandPolling';
 import { clearConnection, loadConnection, saveConnection } from './src/settings/connectionSettings';
 import type { ConnectionSettings } from './src/settings/connectionSettings';
@@ -51,11 +53,14 @@ export default function App() {
   const [commandFeedback, setCommandFeedback] = useState<Record<string, LampCommandFeedback>>({});
   const commandFeedbackRef = useRef<Record<string, LampCommandFeedback>>({});
   const commandLocks = useRef(new Set<V7Id>());
-  const commandRuns = useRef(new Map<V7Id, AbortController>());
+  const commandRuns = useRef(new Map<V7Id, Set<AbortController>>());
+  const commandOwners = useRef(new Map<V7Id, AbortController>());
   const mounted = useRef(true);
 
-  function updateCommand(lampId: V7Id, feedback: LampCommandFeedback) {
+  function updateCommand(lampId: V7Id, feedback: LampCommandFeedback,
+    owner?: AbortController) {
     if (!mounted.current) return;
+    if (owner && commandOwners.current.get(lampId) !== owner) return;
     const next = { ...commandFeedbackRef.current, [lampId]: feedback };
     commandFeedbackRef.current = next;
     setCommandFeedback(next);
@@ -65,8 +70,11 @@ export default function App() {
     mounted.current = true;
     return () => {
       mounted.current = false;
-      commandRuns.current.forEach((controller) => controller.abort());
+      commandRuns.current.forEach((controllers) => {
+        controllers.forEach((controller) => controller.abort());
+      });
       commandRuns.current.clear();
+      commandOwners.current.clear();
     };
   }, []);
 
@@ -85,14 +93,23 @@ export default function App() {
   const sendOutput = useCallback(async (lampId: V7Id, request: LampOutputRequest)
     : Promise<LampRecord | null> => {
     const connection = settings;
-    if (!connection || !acquireLampCommand(commandLocks.current, lampId)) return null;
+    const priorFeedback = commandFeedbackRef.current[String(lampId)];
+    const priorOwner = commandOwners.current.get(lampId);
+    const priorityOff = request.kind === 'power' && request.state === 'off' &&
+      commandLocks.current.has(lampId) && canInterruptWithPriorityOff(priorFeedback);
+    if (!connection || (!priorityOff &&
+        !acquireLampCommand(commandLocks.current, lampId))) return null;
     const requested = requestedPower(request);
     const brightnessPercent = requestBrightness(request);
     const requestFields = brightnessPercent === undefined ? {} : { brightnessPercent };
     const controller = new AbortController();
-    commandRuns.current.set(lampId, controller);
-    updateCommand(lampId, { phase: 'submitting', requested, ...requestFields });
+    const runs = commandRuns.current.get(lampId) ?? new Set<AbortController>();
+    runs.add(controller);
+    commandRuns.current.set(lampId, runs);
+    commandOwners.current.set(lampId, controller);
+    updateCommand(lampId, { phase: 'submitting', requested, ...requestFields }, controller);
     let commandId: V7Id | undefined;
+    let supersededByNewerOutput = false;
     let result: LampCommandFeedback = { phase: 'rejected', requested,
       ...requestFields, message: 'La commande n’a pas pu démarrer.' };
     let updatedLamp: LampRecord | null = null;
@@ -106,7 +123,12 @@ export default function App() {
             controller.signal);
         commandId = submitted.command.id;
         updateCommand(lampId, { phase: 'tracking', requested, commandId,
-          commandState: 'sent', retries: 0, ...requestFields });
+          commandState: 'sent', retries: 0, ...requestFields }, controller);
+        if (priorityOff) {
+          for (const previous of runs) {
+            if (previous !== controller) previous.abort();
+          }
+        }
 
         const outcome = await pollCommand(commandId,
           () => getCommand(connection.ip, commandId!, connection.token, controller.signal), {
@@ -115,7 +137,8 @@ export default function App() {
             onStatus: (command) => {
               if (command.state === 'sent' || command.state === 'accepted') {
                 updateCommand(lampId, { phase: 'tracking', requested, commandId: command.id,
-                  commandState: command.state, retries: command.retries, ...requestFields });
+                  commandState: command.state, retries: command.retries, ...requestFields },
+                  controller);
               }
             },
           });
@@ -157,12 +180,21 @@ export default function App() {
         }
       }
 
+      if (priorityOff && priorFeedback?.phase === 'tracking' &&
+          result.phase === 'rejected' && priorOwner &&
+          !priorOwner.signal.aborted) {
+        commandOwners.current.set(lampId, priorOwner);
+        updateCommand(lampId, { ...priorFeedback,
+          priorityOffError: result.message }, priorOwner);
+        return null;
+      }
+
       if (mounted.current && !controller.signal.aborted) {
         await waitUntilAppActive(controller.signal);
       }
       if (mounted.current && !controller.signal.aborted) {
         updateCommand(lampId, { phase: 'refreshing', requested, ...requestFields,
-          message: 'Relecture de l’état actuel depuis le CORE…' });
+          message: 'Relecture de l’état actuel depuis le CORE…' }, controller);
         try {
           const response = await getDevice(connection.ip, lampId);
           updatedLamp = lampsOnly([response.device])[0] ?? null;
@@ -177,13 +209,24 @@ export default function App() {
         } catch (error) {
           result = { ...result, refreshError: describeApiError(error) };
         }
-        updateCommand(lampId, result);
+        updateCommand(lampId, result, controller);
       }
     } finally {
-      if (commandRuns.current.get(lampId) === controller) commandRuns.current.delete(lampId);
-      if (result.phase !== 'uncertain') releaseLampCommand(commandLocks.current, lampId);
+      const activeRuns = commandRuns.current.get(lampId);
+      activeRuns?.delete(controller);
+      if (activeRuns?.size === 0) commandRuns.current.delete(lampId);
+      const stillOwner = isCurrentLampCommand(commandOwners.current,
+        lampId, controller);
+      supersededByNewerOutput = !stillOwner;
+      if (stillOwner &&
+          result.phase !== 'uncertain') {
+        commandOwners.current.delete(lampId);
+        releaseLampCommand(commandLocks.current, lampId);
+      }
     }
-    return updatedLamp;
+    // A GET already in flight for an older output command must never replace
+    // the lamp view after a newer priority OFF has taken ownership.
+    return supersededByNewerOutput ? null : updatedLamp;
   }, [settings]);
 
   const sendPower = useCallback((lampId: V7Id, state: PowerState) =>
@@ -212,6 +255,7 @@ export default function App() {
           { brightnessPercent: feedback.brightnessPercent }),
         message: `${feedback.message} État relu. Le résultat précédent reste incertain; vérifiez la consigne confirmée. Aucun POST n’a été répété.` });
       releaseLampCommand(commandLocks.current, lampId);
+      commandOwners.current.delete(lampId);
       return lamp;
     } catch (error) {
       updateCommand(lampId, { ...feedback, refreshError: describeApiError(error) });

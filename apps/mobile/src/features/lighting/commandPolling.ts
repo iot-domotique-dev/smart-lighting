@@ -4,7 +4,8 @@ import type { CommandStatusResponse, PowerState, V7Id } from '../../api/types';
 export type LampCommandFeedback =
   | { phase: 'submitting'; requested: PowerState; brightnessPercent?: number }
   | { phase: 'tracking'; requested: PowerState; commandId: V7Id;
-      commandState: 'sent' | 'accepted'; retries: number; brightnessPercent?: number }
+      commandState: 'sent' | 'accepted'; retries: number; brightnessPercent?: number;
+      priorityOffError?: string }
   | { phase: 'refreshing'; requested: PowerState; message: string;
       brightnessPercent?: number }
   | { phase: 'executed'; requested: PowerState; commandId: V7Id; retries: number;
@@ -66,6 +67,11 @@ export function isCommandInProgress(feedback?: LampCommandFeedback): boolean {
     feedback?.phase === 'refreshing' || feedback?.phase === 'uncertain';
 }
 
+export function canInterruptWithPriorityOff(feedback?: LampCommandFeedback): boolean {
+  return feedback?.phase === 'tracking' &&
+    (feedback.requested !== 'off' || feedback.brightnessPercent !== undefined);
+}
+
 export function acquireLampCommand(lockedIds: Set<V7Id>, lampId: V7Id): boolean {
   if (lockedIds.has(lampId)) return false;
   lockedIds.add(lampId);
@@ -74,6 +80,14 @@ export function acquireLampCommand(lockedIds: Set<V7Id>, lampId: V7Id): boolean 
 
 export function releaseLampCommand(lockedIds: Set<V7Id>, lampId: V7Id): void {
   lockedIds.delete(lampId);
+}
+
+export function isCurrentLampCommand(
+  owners: ReadonlyMap<V7Id, AbortController>,
+  lampId: V7Id,
+  owner: AbortController,
+): boolean {
+  return owners.get(lampId) === owner;
 }
 
 export async function pollCommand(

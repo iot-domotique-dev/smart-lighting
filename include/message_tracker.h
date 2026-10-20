@@ -28,6 +28,10 @@ struct PendingMessage {
     // Local-only marker: distinct same-lamp requests overlapped in flight.
     bool executionOrderAmbiguous;
 
+    // Local-only priority OFF coordination; these fields do not go on the wire.
+    bool priorityOff;
+    bool supersededByPriorityOff;
+
     uint8_t retryCount;
 
     uint32_t sentAt;

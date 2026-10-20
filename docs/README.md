@@ -2,7 +2,11 @@
 
 **V7.7.2/V7.7.3 — clôture nominale, 15 octobre 2026 :** l’utilisateur confirme sur Android et matériel réel la découverte, le nommage, l’appairage, ON/OFF, le retrait depuis l’application, le réappairage avec un nouvel ID V7 et la persistance après redémarrage. Ce résultat couvre un MAIN et une LAMP. Les 119 tests firmware natifs et 56 tests mobiles simulés, lint, typage et export Android avaient réussi. Les scénarios de panne, concurrence et plusieurs lampes simultanées restent hors validation. Voir [le protocole, la persistance, les routes, le client mobile et les limites V7.7](V7_7_UNPAIRING.md).
 
-**V7.8.0 — validation fonctionnelle sur matériel, 16 octobre 2026 :** l’utilisateur confirme le réglage de luminosité depuis Android jusqu’à une LED physique sur GPIO18, via HTTP, UART et Zigbee. Le profil unique `lamp_c6` utilise LEDC et conserve ON/OFF. L’essai porte sur un MAIN et une LAMP. La luminosité n’est pas conservée en NVS après redémarrage à froid de LAMP; multi-lampes simultané et scénarios de panne/récupération ne sont pas validés. L’appairage, le retrait, le réappairage et ON/OFF restent couverts par la validation matérielle nominale V7.7 séparée. Voir [le dossier V7.8](V7_8_BRIGHTNESS.md).
+**V7.8.0 — validation fonctionnelle sur matériel, 16 octobre 2026 :** l’utilisateur confirme le réglage de luminosité depuis Android jusqu’à une LED physique sur GPIO18, via HTTP, UART et Zigbee. Le profil unique `lamp_c6` utilise LEDC et conserve ON/OFF. L’essai porte sur un MAIN et une LAMP. La persistance du dernier niveau non nul a été ajoutée ensuite en V7.9.2. Le multi-lampes simultané et les scénarios de panne/récupération ne sont pas validés. L’appairage, le retrait, le réappairage et ON/OFF restent couverts par la validation matérielle nominale V7.7 séparée. Voir [le dossier V7.8 et le complément V7.9.2](V7_8_BRIGHTNESS.md#v792--persistance-du-dernier-niveau).
+
+**V7.9.2 — persistance du dernier niveau LAMP, validée sur matériel le 19 octobre 2026 :** l’association Zigbee a été conservée; 35 % a été appliqué; au redémarrage de LAMP la LED est restée éteinte, puis une commande ON a restauré 35 %, sans réappairage. Les essais de panne pendant une écriture NVS, multi-lampes simultané et mesure électrique restent non couverts. Voir [le bilan V7.9.2](V7_8_BRIGHTNESS.md#v792--persistance-du-dernier-niveau).
+
+**V7.9.5 — OFF prioritaire et retrait sûr pendant un fade :** 157/157 tests natifs passent; les 72 tests mobiles simulés, TypeScript, lint, l’export Android Expo 57 et les quatre builds firmware passent aussi. OFF interrompt un fade actif; le retrait force la sortie à LOW avant le reçu persistant. L’ordre réel reste incertain quand les commandes se chevauchent. Les cas V7.9.5 n’ont pas encore été validés sur matériel; la transaction `UNPAIR_REQUEST` pendant un fade n’est pas exercée par les tests natifs. Voir [le dossier V7.9.5](V7_9_5_OFF_PRIORITY.md).
 
 Le [README du dépôt](../README.md) donne l’état du projet et les commandes courantes. Les documents ci-dessous sont les références techniques actives; chaque sujet a une seule page de détail.
 
@@ -21,7 +25,8 @@ Le [README du dépôt](../README.md) donne l’état du projet et les commandes 
 - [V7.6 — Appairage contrôlé des lampes](V7_6_PAIRING.md) : réservation V7.6.2, sessions pilotées par HTTP, candidates temporaires, ajout depuis l’application V7.6.4, correctif de routage et résultat matériel rapporté.
 - [V7.7 — Désappairage sécurisé](V7_7_UNPAIRING.md) : transaction persistante et réconciliable, migration additive du journal MAIN, routes HTTP, client Android V7.7.3, validation nominale et essais restant à faire.
 
-- [V7.8.0 — variation de luminosité](V7_8_BRIGHTNESS.md) : commande HTTP, suivi des ACK, profil unique `lamp_c6` avec LEDC sur GPIO18 pour le prototype LED basse tension, validation matérielle et limites.
+- [V7.8.0, V7.9.2, V7.9.4 et V7.9.5 — variation, persistance, transitions et OFF prioritaire](V7_8_BRIGHTNESS.md) : API brightness, conservation NVS, fades LEDC, interruption prioritaire et retrait sûr.
+- [V7.9.5 — OFF prioritaire et retrait sécurisé pendant un fade](V7_9_5_OFF_PRIORITY.md) : résultats d’interruption, déduplication, séquencement incertain, retrait et limites de validation.
 
 ## Tests
 
@@ -31,7 +36,7 @@ Les tests natifs couvrent la logique d’appairage/retrait, les codecs et l’AP
 
 ## V7.3 — Commande HTTP locale
 
-La validation V7.3 demeure la référence de l’API de commande locale et de ses erreurs HTTP. Son empreinte de 994 816 octets et sa marge de 53 760 octets sont historiques; la mesure V7.4.2 est dans le [dossier V7.4](V7_4_RELIABILITY.md). L’application mobile est décrite dans le [dossier V7.5](V7_5_MOBILE_APP.md). V7.8.0 ajoute `SET_BRIGHTNESS`; le profil `lamp_c6` est configuré en LEDC pour le prototype LED GPIO18 basse tension. `SET_AUTOMATIC` reste à planifier.
+La validation V7.3 demeure la référence de l’API de commande locale et de ses erreurs HTTP. Son empreinte de 994 816 octets et sa marge de 53 760 octets sont historiques; la mesure V7.4.2 est dans le [dossier V7.4](V7_4_RELIABILITY.md). L’application mobile est décrite dans le [dossier V7.5](V7_5_MOBILE_APP.md). V7.8.0 ajoute `SET_BRIGHTNESS`; V7.9.2 conserve le dernier niveau non nul en NVS LAMP et a été validée sur le parcours de redémarrage décrit ci-dessus. Le profil `lamp_c6` utilise LEDC pour le prototype LED GPIO18 basse tension. `SET_AUTOMATIC` reste à planifier.
 
 ## Historique
 

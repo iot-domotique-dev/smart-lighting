@@ -112,7 +112,9 @@ void MemoryProvisioningReservationStore::setFailWrites(bool fail) {
 }
 
 MemoryProvisioningStore::MemoryProvisioningStore()
-    : hasRecord(false), hasRemovalReceipt(false), failWrites(false) {
+    : lastNonzeroBrightness(0), hasRecord(false), hasRemovalReceipt(false),
+      hasLastNonzeroBrightness(false), failWrites(false),
+      failBrightnessReads(false), brightnessWriteAttemptCount(0) {
     memset(&record, 0, sizeof(record));
     memset(&removalReceipt, 0, sizeof(removalReceipt));
 }
@@ -179,6 +181,39 @@ bool MemoryProvisioningStore::clearRemovalReceipt() {
     return true;
 }
 
+LampBrightnessLoadResult MemoryProvisioningStore::loadLastNonzeroBrightness(
+    uint8_t& brightness
+) const {
+    brightness = 0;
+    if (failBrightnessReads) return LampBrightnessLoadResult::ERROR;
+    if (!hasLastNonzeroBrightness) return LampBrightnessLoadResult::NOT_FOUND;
+    brightness = lastNonzeroBrightness;
+    return brightness >= 1 && brightness <= 100
+        ? LampBrightnessLoadResult::FOUND
+        : LampBrightnessLoadResult::INVALID;
+}
+
+bool MemoryProvisioningStore::saveLastNonzeroBrightness(uint8_t brightness) {
+    ++brightnessWriteAttemptCount;
+    if (failWrites || brightness < 1 || brightness > 100) return false;
+    lastNonzeroBrightness = brightness;
+    hasLastNonzeroBrightness = true;
+    return true;
+}
+
 void MemoryProvisioningStore::setFailWrites(bool fail) {
     failWrites = fail;
+}
+
+void MemoryProvisioningStore::setFailBrightnessReads(bool fail) {
+    failBrightnessReads = fail;
+}
+
+void MemoryProvisioningStore::setStoredBrightnessForTest(uint8_t brightness) {
+    lastNonzeroBrightness = brightness;
+    hasLastNonzeroBrightness = true;
+}
+
+uint32_t MemoryProvisioningStore::getBrightnessWriteAttemptCount() const {
+    return brightnessWriteAttemptCount;
 }

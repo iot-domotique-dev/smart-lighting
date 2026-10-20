@@ -26,9 +26,15 @@
 
 namespace {
 bool outputInitialized = false;
-uint8_t lastNonzeroBrightness = 100;
 #if defined(SMART_LIGHTING_LAMP_PWM_ENABLED)
 bool pwmOutputReady = false;
+bool fadeOutputReady = false;
+bool fadeServiceInstalled = false;
+portMUX_TYPE fadeCallbackMux = portMUX_INITIALIZER_UNLOCKED;
+uint32_t fadeCallbackSequence = 0;
+uint32_t fadeCallbackDuty = 0;
+uint32_t fadeActiveGeneration = 0;
+uint32_t fadeCallbackGeneration = 0;
 
 constexpr ledc_mode_t PWM_MODE = LEDC_LOW_SPEED_MODE;
 constexpr ledc_timer_t PWM_TIMER = LEDC_TIMER_0;
@@ -44,20 +50,45 @@ uint32_t brightnessDuty(uint8_t percent) {
 }
 
 bool writePwmDuty(uint8_t percent) {
-    const esp_err_t setResult = ledc_set_duty(
-        PWM_MODE, PWM_CHANNEL, brightnessDuty(percent));
-    if (setResult != ESP_OK) {
-        Serial.print("[LAMP] LEDC set duty failed: ");
-        Serial.println(static_cast<int32_t>(setResult));
-        return false;
-    }
-    const esp_err_t updateResult = ledc_update_duty(PWM_MODE, PWM_CHANNEL);
-    if (updateResult != ESP_OK) {
-        Serial.print("[LAMP] LEDC update duty failed: ");
-        Serial.println(static_cast<int32_t>(updateResult));
+    const esp_err_t result = ledc_set_duty_and_update(
+        PWM_MODE, PWM_CHANNEL, brightnessDuty(percent), 0);
+    if (result != ESP_OK) {
+        Serial.print("[LAMP] LEDC duty update failed: ");
+        Serial.println(static_cast<int32_t>(result));
         return false;
     }
     return true;
+}
+
+bool onPwmFadeComplete(const ledc_cb_param_t* param, void*) {
+    if (param == nullptr || param->event != LEDC_FADE_END_EVT) return false;
+    portENTER_CRITICAL_ISR(&fadeCallbackMux);
+    fadeCallbackDuty = param->duty;
+    fadeCallbackGeneration = fadeActiveGeneration;
+    ++fadeCallbackSequence;
+    portEXIT_CRITICAL_ISR(&fadeCallbackMux);
+    return false;
+}
+
+uint32_t readFadeCallbackSequence() {
+    portENTER_CRITICAL(&fadeCallbackMux);
+    const uint32_t sequence = fadeCallbackSequence;
+    portEXIT_CRITICAL(&fadeCallbackMux);
+    return sequence;
+}
+
+uint32_t readFadeCallbackDuty() {
+    portENTER_CRITICAL(&fadeCallbackMux);
+    const uint32_t duty = fadeCallbackDuty;
+    portEXIT_CRITICAL(&fadeCallbackMux);
+    return duty;
+}
+
+uint32_t readFadeCallbackGeneration() {
+    portENTER_CRITICAL(&fadeCallbackMux);
+    const uint32_t generation = fadeCallbackGeneration;
+    portEXIT_CRITICAL(&fadeCallbackMux);
+    return generation;
 }
 #endif
 }  // namespace
@@ -65,10 +96,19 @@ bool writePwmDuty(uint8_t percent) {
 void initializeLampHardware() {
     outputInitialized = false;
 #if defined(SMART_LIGHTING_LAMP_PWM_ENABLED)
+    if (fadeServiceInstalled) {
+        ledc_fade_func_uninstall();
+        fadeServiceInstalled = false;
+    }
     pwmOutputReady = false;
+    fadeOutputReady = false;
+    portENTER_CRITICAL(&fadeCallbackMux);
+    fadeCallbackSequence = 0;
+    fadeCallbackDuty = 0;
+    fadeActiveGeneration = 0;
+    fadeCallbackGeneration = 0;
+    portEXIT_CRITICAL(&fadeCallbackMux);
 #endif
-    lastNonzeroBrightness = 100;
-
     gpio_config_t config = {};
     config.pin_bit_mask = 1ULL << SMART_LIGHTING_LED_GPIO;
     config.mode = GPIO_MODE_OUTPUT;
@@ -119,6 +159,24 @@ void initializeLampHardware() {
         return;
     }
     pwmOutputReady = true;
+
+    const esp_err_t fadeInstallResult = ledc_fade_func_install(0);
+    if (fadeInstallResult == ESP_OK) {
+        fadeServiceInstalled = true;
+        ledc_cbs_t callbacks = {};
+        callbacks.fade_cb = onPwmFadeComplete;
+        if (ledc_cb_register(PWM_MODE, PWM_CHANNEL, &callbacks, nullptr) == ESP_OK) {
+            fadeOutputReady = true;
+            Serial.println("[LAMP] LEDC fade callback ready");
+        } else {
+            ledc_fade_func_uninstall();
+            fadeServiceInstalled = false;
+            Serial.println("[LAMP] LEDC fade callback registration failed; brightness remains immediate");
+        }
+    } else {
+        Serial.print("[LAMP] LEDC fade service unavailable; brightness remains immediate: ");
+        Serial.println(static_cast<int32_t>(fadeInstallResult));
+    }
     Serial.println("[LAMP] LEDC output ready; brightness 100 maps to configured safe ceiling");
 #else
     Serial.println("[LAMP] GPIO output initialized LOW (digital profile; PWM disabled)");
@@ -133,7 +191,102 @@ bool lampHardwareSupportsBrightness() {
 #endif
 }
 
-bool writeLampHardwarePower(bool enabled) {
+bool lampHardwareSupportsFade() {
+#if defined(SMART_LIGHTING_LAMP_PWM_ENABLED)
+    return outputInitialized && pwmOutputReady && fadeOutputReady;
+#else
+    return false;
+#endif
+}
+
+LampHardwareFadeStartResult startLampHardwareFade(uint8_t percent,
+                                                  uint16_t durationMs,
+                                                  uint32_t generation) {
+#if defined(SMART_LIGHTING_LAMP_PWM_ENABLED)
+    if (!lampHardwareSupportsBrightness() || percent > 100 || durationMs == 0 ||
+        generation == 0)
+        return LampHardwareFadeStartResult::FAILED;
+    if (!fadeOutputReady) return LampHardwareFadeStartResult::UNSUPPORTED;
+    portENTER_CRITICAL(&fadeCallbackMux);
+    fadeActiveGeneration = generation;
+    portEXIT_CRITICAL(&fadeCallbackMux);
+    const esp_err_t result = ledc_set_fade_time_and_start(
+        PWM_MODE, PWM_CHANNEL, brightnessDuty(percent), durationMs,
+        LEDC_FADE_NO_WAIT);
+    if (result != ESP_OK) {
+        portENTER_CRITICAL(&fadeCallbackMux);
+        if (fadeActiveGeneration == generation) fadeActiveGeneration = 0;
+        portEXIT_CRITICAL(&fadeCallbackMux);
+        Serial.print("[LAMP] LEDC fade start failed: ");
+        Serial.println(static_cast<int32_t>(result));
+        return LampHardwareFadeStartResult::FAILED;
+    }
+    return LampHardwareFadeStartResult::STARTED;
+#else
+    (void)percent;
+    (void)durationMs;
+    return LampHardwareFadeStartResult::UNSUPPORTED;
+#endif
+}
+
+uint32_t lampHardwareFadeCompletionSequence() {
+#if defined(SMART_LIGHTING_LAMP_PWM_ENABLED)
+    return readFadeCallbackSequence();
+#else
+    return 0;
+#endif
+}
+
+bool lampHardwareFadeCompletionMatches(uint32_t& observedSequence,
+                                       uint8_t percent,
+                                       uint32_t generation) {
+#if defined(SMART_LIGHTING_LAMP_PWM_ENABLED)
+    if (!lampHardwareSupportsFade() || percent > 100 || generation == 0)
+        return false;
+    const uint32_t sequence = readFadeCallbackSequence();
+    if (sequence == observedSequence) return false;
+    observedSequence = sequence;
+    const uint32_t expectedDuty = brightnessDuty(percent);
+    return readFadeCallbackDuty() == expectedDuty &&
+           readFadeCallbackGeneration() == generation &&
+           ledc_get_duty(PWM_MODE, PWM_CHANNEL) == expectedDuty;
+#else
+    (void)observedSequence;
+    (void)percent;
+    (void)generation;
+    return false;
+#endif
+}
+
+bool lampHardwareFadeAtTarget(uint8_t percent) {
+#if defined(SMART_LIGHTING_LAMP_PWM_ENABLED)
+    return lampHardwareSupportsBrightness() && percent <= 100 &&
+           ledc_get_duty(PWM_MODE, PWM_CHANNEL) == brightnessDuty(percent);
+#else
+    (void)percent;
+    return false;
+#endif
+}
+
+bool stopLampHardwareFade() {
+#if defined(SMART_LIGHTING_LAMP_PWM_ENABLED)
+    if (!fadeServiceInstalled) return true;
+    const esp_err_t result = ledc_fade_stop(PWM_MODE, PWM_CHANNEL);
+    if (result == ESP_OK) {
+        portENTER_CRITICAL(&fadeCallbackMux);
+        fadeActiveGeneration = 0;
+        portEXIT_CRITICAL(&fadeCallbackMux);
+        return true;
+    }
+    Serial.print("[LAMP] LEDC fade stop failed: ");
+    Serial.println(static_cast<int32_t>(result));
+    return false;
+#else
+    return true;
+#endif
+}
+
+bool writeLampHardwarePower(bool enabled, uint8_t lastNonzeroBrightness) {
     if (!outputInitialized) return false;
 #if defined(SMART_LIGHTING_LAMP_PWM_ENABLED)
     if (pwmOutputReady) {
@@ -153,7 +306,6 @@ bool writeLampHardwareBrightness(uint8_t percent) {
     if (percent > 100 || !lampHardwareSupportsBrightness()) return false;
 #if defined(SMART_LIGHTING_LAMP_PWM_ENABLED)
     if (!writePwmDuty(percent)) return false;
-    if (percent != 0) lastNonzeroBrightness = percent;
     return true;
 #else
     return false;
@@ -167,9 +319,18 @@ namespace {
 bool simulationConfigured = false;
 bool simulationBrightnessSupported = false;
 bool simulationFailNextWrite = false;
+bool simulationFadeSupported = true;
+bool simulationFadeActive = false;
+bool simulationFailNextFadeStart = false;
+bool simulationFailNextFadeStop = false;
 uint8_t simulationOutput = 0;
-uint8_t simulationLastNonzero = 100;
 uint8_t simulationAllowedMaximumPercent = 100;
+uint8_t simulationFadeTarget = 0;
+uint32_t simulationFadeSequence = 0;
+uint8_t simulationFadeCallbackPercent = 0;
+uint32_t simulationFadeGeneration = 0;
+uint32_t simulationFadeCallbackGeneration = 0;
+uint16_t simulationFadeDurationMs = 0;
 
 bool consumeSimulationFailure() {
     if (!simulationFailNextWrite) return false;
@@ -179,12 +340,21 @@ bool consumeSimulationFailure() {
 }  // namespace
 
 void configureLampHardwareSimulation(bool brightnessSupported,
-                                     uint8_t allowedMaximumPercent) {
+                                     uint8_t allowedMaximumPercent,
+                                     bool fadeSupported) {
     simulationConfigured = true;
     simulationBrightnessSupported = brightnessSupported;
+    simulationFadeSupported = fadeSupported;
     simulationFailNextWrite = false;
     simulationOutput = 0;
-    simulationLastNonzero = 100;
+    simulationFadeActive = false;
+    simulationFailNextFadeStart = false;
+    simulationFailNextFadeStop = false;
+    simulationFadeSequence = 0;
+    simulationFadeCallbackPercent = 0;
+    simulationFadeGeneration = 0;
+    simulationFadeCallbackGeneration = 0;
+    simulationFadeDurationMs = 0;
     simulationAllowedMaximumPercent = allowedMaximumPercent >= 1 &&
                                      allowedMaximumPercent <= 100
         ? allowedMaximumPercent : 100;
@@ -192,6 +362,51 @@ void configureLampHardwareSimulation(bool brightnessSupported,
 
 void failNextLampHardwareWrite() {
     simulationFailNextWrite = true;
+}
+
+void failNextLampHardwareFadeStart() {
+    simulationFailNextFadeStart = true;
+}
+
+void failNextLampHardwareFadeStop() {
+    simulationFailNextFadeStop = true;
+}
+
+void simulateLampHardwareFadeCompletion() {
+    if (!simulationFadeActive) return;
+    simulationOutput = static_cast<uint8_t>(lampPwmDutyFromPercent(
+        100, simulationAllowedMaximumPercent, simulationFadeTarget));
+    simulationFadeCallbackPercent = simulationFadeTarget;
+    simulationFadeCallbackGeneration = simulationFadeGeneration;
+    simulationFadeActive = false;
+    simulationFadeGeneration = 0;
+    ++simulationFadeSequence;
+}
+
+void simulateLampHardwareReachTargetWithoutCallback() {
+    if (!simulationFadeActive) return;
+    simulationOutput = static_cast<uint8_t>(lampPwmDutyFromPercent(
+        100, simulationAllowedMaximumPercent, simulationFadeTarget));
+    simulationFadeActive = false;
+}
+
+void simulateLampHardwareFadeCallback(uint8_t reportedPercent) {
+    simulationFadeCallbackPercent = reportedPercent;
+    simulationFadeCallbackGeneration = simulationFadeGeneration;
+    ++simulationFadeSequence;
+}
+
+void simulateLampHardwareFadeCallbackForGeneration(uint8_t reportedPercent,
+                                                   uint32_t generation) {
+    simulationFadeCallbackPercent = reportedPercent;
+    simulationFadeCallbackGeneration = generation;
+    ++simulationFadeSequence;
+}
+
+bool simulatedLampHardwareFadeActive() { return simulationFadeActive; }
+
+uint16_t simulatedLampHardwareFadeDuration() {
+    return simulationFadeDurationMs;
 }
 
 uint8_t simulatedLampHardwareOutput() {
@@ -203,7 +418,11 @@ void initializeLampHardware() {
 #if !defined(ESP_PLATFORM)
     if (simulationConfigured) {
         simulationOutput = 0;
-        simulationLastNonzero = 100;
+        simulationFadeActive = false;
+        simulationFadeSequence = 0;
+        simulationFadeCallbackPercent = 0;
+        simulationFadeGeneration = 0;
+        simulationFadeCallbackGeneration = 0;
     }
 #endif
 #if defined(SMART_LIGHTING_ZIGBEE) && defined(DEVICE_ROLE_LAMP)
@@ -221,7 +440,96 @@ bool lampHardwareSupportsBrightness() {
 #endif
 }
 
-bool writeLampHardwarePower(bool enabled) {
+bool lampHardwareSupportsFade() {
+#if !defined(ESP_PLATFORM)
+    return simulationConfigured && simulationBrightnessSupported &&
+           simulationFadeSupported;
+#else
+    return false;
+#endif
+}
+
+LampHardwareFadeStartResult startLampHardwareFade(uint8_t percent,
+                                                  uint16_t durationMs,
+                                                  uint32_t generation) {
+#if !defined(ESP_PLATFORM)
+    if (!lampHardwareSupportsBrightness() || percent > 100 || durationMs == 0 ||
+        generation == 0)
+        return LampHardwareFadeStartResult::FAILED;
+    if (!simulationFadeSupported) return LampHardwareFadeStartResult::UNSUPPORTED;
+    if (simulationFailNextFadeStart) {
+        simulationFailNextFadeStart = false;
+        return LampHardwareFadeStartResult::FAILED;
+    }
+    if (simulationFadeActive) return LampHardwareFadeStartResult::FAILED;
+    simulationFadeTarget = percent;
+    simulationFadeDurationMs = durationMs;
+    simulationFadeGeneration = generation;
+    simulationFadeActive = true;
+    return LampHardwareFadeStartResult::STARTED;
+#else
+    (void)percent;
+    (void)durationMs;
+    (void)generation;
+    return LampHardwareFadeStartResult::UNSUPPORTED;
+#endif
+}
+
+uint32_t lampHardwareFadeCompletionSequence() {
+#if !defined(ESP_PLATFORM)
+    return simulationFadeSequence;
+#else
+    return 0;
+#endif
+}
+
+bool lampHardwareFadeCompletionMatches(uint32_t& observedSequence,
+                                       uint8_t percent,
+                                       uint32_t generation) {
+#if !defined(ESP_PLATFORM)
+    if (!lampHardwareSupportsFade() || simulationFadeSequence == observedSequence)
+        return false;
+    observedSequence = simulationFadeSequence;
+    const uint8_t expected = static_cast<uint8_t>(lampPwmDutyFromPercent(
+        100, simulationAllowedMaximumPercent, percent));
+    const uint8_t callback = static_cast<uint8_t>(lampPwmDutyFromPercent(
+        100, simulationAllowedMaximumPercent, simulationFadeCallbackPercent));
+    return simulationOutput == expected && callback == expected &&
+           simulationFadeCallbackGeneration == generation;
+#else
+    (void)observedSequence;
+    (void)percent;
+    (void)generation;
+    return false;
+#endif
+}
+
+bool lampHardwareFadeAtTarget(uint8_t percent) {
+#if !defined(ESP_PLATFORM)
+    if (!lampHardwareSupportsBrightness() || percent > 100) return false;
+    return simulationOutput == static_cast<uint8_t>(lampPwmDutyFromPercent(
+        100, simulationAllowedMaximumPercent, percent));
+#else
+    (void)percent;
+    return false;
+#endif
+}
+
+bool stopLampHardwareFade() {
+#if !defined(ESP_PLATFORM)
+    if (simulationFailNextFadeStop) {
+        simulationFailNextFadeStop = false;
+        return false;
+    }
+    simulationFadeActive = false;
+    simulationFadeGeneration = 0;
+    return true;
+#else
+    return true;
+#endif
+}
+
+bool writeLampHardwarePower(bool enabled, uint8_t lastNonzeroBrightness) {
 #if !defined(ESP_PLATFORM)
     if (!simulationConfigured) return true;
     if (consumeSimulationFailure()) return false;
@@ -229,7 +537,7 @@ bool writeLampHardwarePower(bool enabled) {
         simulationOutput = enabled
             ? static_cast<uint8_t>(lampPwmDutyFromPercent(
                   100, simulationAllowedMaximumPercent,
-                  simulationLastNonzero))
+                  lastNonzeroBrightness))
             : 0;
     } else {
         simulationOutput = enabled ? 100 : 0;
@@ -238,9 +546,11 @@ bool writeLampHardwarePower(bool enabled) {
 #else
 #if defined(SMART_LIGHTING_ZIGBEE) && defined(DEVICE_ROLE_LAMP)
     (void)enabled;
+    (void)lastNonzeroBrightness;
     return false;
 #else
     (void)enabled;
+    (void)lastNonzeroBrightness;
     return true;
 #endif
 #endif
@@ -254,7 +564,6 @@ bool writeLampHardwareBrightness(uint8_t percent) {
     }
     simulationOutput = static_cast<uint8_t>(lampPwmDutyFromPercent(
         100, simulationAllowedMaximumPercent, percent));
-    if (percent != 0) simulationLastNonzero = percent;
     return true;
 #else
     (void)percent;

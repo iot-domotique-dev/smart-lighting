@@ -323,7 +323,10 @@ public:
         Lamp* localLamp = findLamp(endpoint, coreLamp->localId);
         TEST_ASSERT_NOT_NULL(localLamp);
         localLamp->device.capabilities = coreLamp->capabilities;
-        configureLampHardwareSimulation(true);
+        // These end-to-end command tests cover routing and ACK correlation.
+        // Fade timing is exercised by test_stabilization; keep this simulated
+        // endpoint immediate unless a priority-interruption test opts in.
+        configureLampHardwareSimulation(true, 100, false);
     }
 
     void submitBrightnessTo(uint32_t destinationId, int32_t percent,
@@ -829,7 +832,9 @@ void test_one_output_command_in_flight_per_lamp_across_power_and_brightness() {
                           static_cast<int>(lamp->lastConfirmedPowerStatus));
 
     network.pump();
-    TEST_ASSERT_EQUAL_UINT32(2, Serial.powerExecutionCount);
+    // The first ON uses the digital action path; immediate PWM OFF is applied
+    // by LampController and therefore does not pass through the fake counter.
+    TEST_ASSERT_EQUAL_UINT32(1, Serial.powerExecutionCount);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::OFF),
                           static_cast<int>(lamp->lastConfirmedPower));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::CONFIRMED),
@@ -843,6 +848,132 @@ void test_one_output_command_in_flight_per_lamp_across_power_and_brightness() {
     TEST_ASSERT_EQUAL_UINT32(0, rejectedId);
     network.pump();
     network.assertExecuted(FIRST_COMMAND + 203);
+}
+
+void test_priority_off_supersedes_pending_output_without_old_ack_overwrite() {
+    Network network;
+    network.submit(false, FIRST_COMMAND + 205);
+    network.pump();
+    Device* lamp = findDeviceById(network.registry, network.lampId);
+    TEST_ASSERT_NOT_NULL(lamp);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::OFF),
+                          static_cast<int>(lamp->lastConfirmedPower));
+
+    network.enableBrightnessFor(network.lampId);
+    configureLampHardwareSimulation(true, 100, true);
+    const uint32_t olderId = FIRST_COMMAND + 206;
+    const uint32_t offId = FIRST_COMMAND + 207;
+    network.submitBrightnessTo(network.lampId, 80, olderId);
+    uint32_t submittedOff = 0;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreCommandError::NONE),
+        static_cast<int>(network.core.submitPower(network.lampId, false,
+            submittedOff, offId)));
+    TEST_ASSERT_EQUAL_UINT32(offId, submittedOff);
+    TEST_ASSERT_TRUE(network.pending(olderId)->supersededByPriorityOff);
+    TEST_ASSERT_TRUE(network.pending(offId)->priorityOff);
+    TEST_ASSERT_FALSE(network.pending(offId)->executionOrderAmbiguous);
+
+    // Drop the canceled fade's FAILED ACK. The superseded command is fenced at
+    // LAMP, so a confirmed OFF remains authoritative despite a late ACK.
+    network.dropFinalMainToCore = 1;
+    network.pump();
+    TEST_ASSERT_FALSE(network.pending(olderId)->waitingForAck);
+    TEST_ASSERT_TRUE(network.pending(olderId)->completed);
+    network.assertExecuted(offId);
+    TEST_ASSERT_FALSE(findLamp(network.lampLamps, network.lampLocal)->state.power);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::OFF),
+                          static_cast<int>(lamp->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::CONFIRMED),
+                          static_cast<int>(lamp->lastConfirmedPowerStatus));
+
+    const Message delayedFadeAck = makeCoreCommandAck(
+        network.pending(olderId)->message, network.lampId,
+        ExecutionStatus::EXECUTED);
+    network.deliverReply(delayedFadeAck);
+    TEST_ASSERT_TRUE(network.pending(olderId)->completed);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::OFF),
+                          static_cast<int>(lamp->lastConfirmedPower));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPowerStatus::CONFIRMED),
+                          static_cast<int>(lamp->lastConfirmedPowerStatus));
+    TEST_ASSERT_FALSE(findLamp(network.lampLamps, network.lampLocal)->state.power);
+}
+
+void test_priority_off_is_allowed_after_brightness_receipt_and_fences_its_id() {
+    Network network;
+    network.enableBrightnessFor(network.lampId);
+    const uint32_t brightnessId = FIRST_COMMAND + 208;
+    const uint32_t offId = FIRST_COMMAND + 209;
+    network.submitBrightnessTo(network.lampId, 100, brightnessId);
+    network.dropMainToLamp = 1;
+    network.deliverToMainAndReceipt();
+    TEST_ASSERT_TRUE(network.pending(brightnessId)->accepted);
+    TEST_ASSERT_TRUE(network.pending(brightnessId)->waitingForAck);
+
+    uint32_t submittedOff = 0;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreCommandError::NONE),
+        static_cast<int>(network.core.submitPower(network.lampId, false,
+            submittedOff, offId)));
+    TEST_ASSERT_EQUAL_UINT32(offId, submittedOff);
+    TEST_ASSERT_EQUAL_UINT32(brightnessId,
+        static_cast<uint32_t>(network.pending(offId)->message.value2));
+    TEST_ASSERT_TRUE(network.pending(brightnessId)->supersededByPriorityOff);
+
+    // A is still queued for the LAMP when OFF is submitted. Deliver OFF first,
+    // then deliver A late as if its Zigbee frame had been delayed in transit.
+    network.pump();
+    network.assertExecuted(offId);
+    TEST_ASSERT_FALSE(findLamp(network.lampLamps, network.lampLocal)->state.power);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LastConfirmedPower::OFF),
+        static_cast<int>(findDeviceById(network.registry,
+            network.lampId)->lastConfirmedPower));
+    TEST_ASSERT_TRUE(network.pending(brightnessId)->completed);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ExecutionStatus::FAILED),
+        static_cast<int>(network.pending(brightnessId)->message.executionStatus));
+
+    Message delayed = network.wifiUart.sent[0].message;
+    TEST_ASSERT_EQUAL_UINT32(brightnessId, delayed.id);
+    network.lampRadio.incoming.push_back(delayed);
+    processMessages(network.lampZigbee, network.lampTracker,
+        network.lampDedup, network.lampLamps, network.groups, network.scenes);
+    TEST_ASSERT_FALSE(findLamp(network.lampLamps, network.lampLocal)->state.power);
+    TEST_ASSERT_EQUAL_UINT8(0, Serial.powerExecutionCount);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ExecutionStatus::FAILED),
+        static_cast<int>(findProcessedMessage(network.lampDedup,
+            CORE_LOGICAL_ID, brightnessId)->executionStatus));
+}
+
+void test_priority_off_suppresses_old_retry_and_duplicate_off_is_rejected() {
+    Network network;
+    network.enableBrightnessFor(network.lampId);
+    const uint32_t brightnessId = FIRST_COMMAND + 210;
+    const uint32_t offId = FIRST_COMMAND + 211;
+    uint32_t ignoredId = 0;
+    network.submitBrightnessTo(network.lampId, 75, brightnessId);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreCommandError::NONE),
+        static_cast<int>(network.core.submitPower(network.lampId, false,
+            ignoredId, offId)));
+    TEST_ASSERT_EQUAL_UINT32(offId, ignoredId);
+
+    uint32_t duplicateOffId = 0;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CoreCommandError::COMMAND_IN_PROGRESS),
+        static_cast<int>(network.core.submitPower(network.lampId, false,
+            duplicateOffId, FIRST_COMMAND + 212)));
+    TEST_ASSERT_EQUAL_UINT32(0, duplicateOffId);
+
+    network.dropMainToLamp = 1;       // The old brightness never reaches LAMP.
+    network.dropFinalMainToCore = 1;  // OFF executes, but its first final ACK is lost.
+    network.pump();
+    TEST_ASSERT_TRUE(network.pending(brightnessId)->waitingForAck);
+    TEST_ASSERT_TRUE(network.pending(offId)->waitingForAck);
+    TEST_ASSERT_EQUAL_UINT(2, network.wifiUart.sent.size());
+
+    network.retry();
+    TEST_ASSERT_EQUAL_UINT(3, network.wifiUart.sent.size());
+    TEST_ASSERT_EQUAL_UINT32(offId, network.wifiUart.sent[2].message.id);
+    TEST_ASSERT_EQUAL_UINT8(0, Serial.powerExecutionCount);
+    TEST_ASSERT_FALSE(findLamp(network.lampLamps, network.lampLocal)->state.power);
+    network.assertExecuted(offId);
+    TEST_ASSERT_TRUE(network.pending(brightnessId)->completed);
 }
 
 void test_brightness_values_traverse_full_path_and_update_only_after_executed_ack() {
@@ -1141,6 +1272,7 @@ void test_removal_guard_is_lamp_scoped_and_blocks_unknown_execution() {
 
     network.submitTo(network.lampId, true, FIRST_COMMAND);
     TEST_ASSERT_TRUE(network.core.hasUnresolvedPowerCommand(network.lampId));
+    TEST_ASSERT_TRUE(network.core.canBeginRemoval(network.lampId));
     TEST_ASSERT_FALSE(network.core.hasUnresolvedPowerCommand(network.secondLampId));
     network.pump();
     TEST_ASSERT_FALSE(network.core.hasUnresolvedPowerCommand(network.lampId));
@@ -1155,6 +1287,7 @@ void test_removal_guard_is_lamp_scoped_and_blocks_unknown_execution() {
     TEST_ASSERT_TRUE(findDeviceById(uncertain.registry,
         uncertain.lampId)->powerExecutionUnknown);
     TEST_ASSERT_TRUE(uncertain.core.hasUnresolvedPowerCommand(uncertain.lampId));
+    TEST_ASSERT_FALSE(uncertain.core.canBeginRemoval(uncertain.lampId));
     TEST_ASSERT_FALSE(uncertain.core.hasUnresolvedPowerCommand(
         uncertain.secondLampId));
 }
@@ -1604,6 +1737,9 @@ int main(int, char**) {
     RUN_TEST(test_two_lamp_confirmed_power_states_are_independent);
     RUN_TEST(test_expired_power_command_preserves_old_value_as_stale);
     RUN_TEST(test_one_output_command_in_flight_per_lamp_across_power_and_brightness);
+    RUN_TEST(test_priority_off_supersedes_pending_output_without_old_ack_overwrite);
+    RUN_TEST(test_priority_off_is_allowed_after_brightness_receipt_and_fences_its_id);
+    RUN_TEST(test_priority_off_suppresses_old_retry_and_duplicate_off_is_rejected);
     RUN_TEST(test_brightness_values_traverse_full_path_and_update_only_after_executed_ack);
     RUN_TEST(test_brightness_capability_range_invalid_ack_retry_and_timeout);
     RUN_TEST(test_pwm_driver_failure_returns_failed_ack_without_confirming_new_level);

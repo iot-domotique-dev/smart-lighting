@@ -741,6 +741,7 @@ void test_removal_is_transactional_and_repair_gets_a_new_id() {
     MainProvisioning main(MAIN_LOCAL_ID, registry, &reservations);
     MemoryProvisioningStore firstStore;
     MemoryProvisioningStore secondStore;
+    TEST_ASSERT_TRUE(firstStore.saveLastNonzeroBrightness(35));
     ProvisioningLamp first("C6-0000000000000001", "0.4.0", 0, firstStore);
     ProvisioningLamp second("C6-0000000000000002", "0.4.0", 0, secondStore);
     main.discover(first.announce());
@@ -844,6 +845,10 @@ void test_removal_is_transactional_and_repair_gets_a_new_id() {
     TEST_ASSERT_EQUAL_INT(static_cast<int>(PairingState::UNPAIRED),
                           static_cast<int>(first.state()));
     TEST_ASSERT_FALSE(first.handleUnpairCommit(commit));
+    uint8_t retainedBrightness = 0;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LampBrightnessLoadResult::FOUND),
+        static_cast<int>(firstStore.loadLastNonzeroBrightness(retainedBrightness)));
+    TEST_ASSERT_EQUAL_UINT8(35, retainedBrightness);
 
     TEST_ASSERT_EQUAL_INT(static_cast<int>(DiscoveryResult::IDENTITY_CONFLICT),
         static_cast<int>(main.discover(oldFirstAnnouncement)));
@@ -856,6 +861,10 @@ void test_removal_is_transactional_and_repair_gets_a_new_id() {
     TEST_ASSERT_TRUE(completePairing(main, first, "C6-0000000000000001",
                                     "FIRST_AGAIN", repairedConfirmation));
     TEST_ASSERT_TRUE(repairedConfirmation.deviceId > firstConfirmation.deviceId);
+    TEST_ASSERT_NOT_EQUAL(firstConfirmation.deviceId, repairedConfirmation.deviceId);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LampBrightnessLoadResult::FOUND),
+        static_cast<int>(firstStore.loadLastNonzeroBrightness(retainedBrightness)));
+    TEST_ASSERT_EQUAL_UINT8(35, retainedBrightness);
     TEST_ASSERT_FALSE(first.handleUnpairCommit(commit));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(PairingState::PAIRED),
                           static_cast<int>(first.state()));

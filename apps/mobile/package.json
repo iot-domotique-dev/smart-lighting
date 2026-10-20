@@ -25,7 +25,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "test:api": "node --test test/coreApiClient.test.cjs test/pairingWorkflow.test.cjs test/removalWorkflow.test.cjs test/brightnessControl.test.cjs",
+    "test:api": "node --test test/coreApiClient.test.cjs test/pairingWorkflow.test.cjs test/removalWorkflow.test.cjs test/brightnessControl.test.cjs test/commandPolling.test.cjs",
     "lint": "expo lint"
   },
   "private": true,

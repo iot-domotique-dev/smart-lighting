@@ -29,7 +29,7 @@ test('détail expose une action de retrait séparée et exige la confirmation ex
   assert.match(viewSource, /\{ text: 'Confirmer le retrait', style: 'destructive',[\s\S]*onPress: \(\) => void confirmRemovalRequest\(lamp\)/);
   assert.deepEqual(workflow.createRemovalConfirmation('Lampe salon', 11), {
     title: 'Retirer cette lampe ?',
-    message: 'Nom : Lampe salon\nIdentifiant : 11\n\nElle sera retirée de Smart Lighting et pourra être ajoutée à nouveau ultérieurement. Ce retrait n’éteint pas la sortie électrique.',
+    message: 'Nom : Lampe salon\nIdentifiant : 11\n\nElle sera retirée de Smart Lighting et pourra être ajoutée à nouveau ultérieurement. Avant le désappairage, la lampe tentera d’arrêter un fade actif et de forcer sa sortie GPIO à l’état bas. Si cette extinction ne peut pas être confirmée par le pilote, le retrait sera refusé. Cela ne mesure pas l’état électrique de la LED.',
   });
 });
 
@@ -70,7 +70,7 @@ test('retrait impossible si lampe ou MAIN hors ligne, commande incertaine ou op�
   assert.equal(workflow.canRequestRemoval(ready), true);
   for (const patch of [
     { lampOnline: false }, { mainOnline: false }, { inventoryFresh: false },
-    { commandPhase: 'uncertain' }, { commandPhase: 'tracking' },
+    { commandPhase: 'uncertain' },
     { hasPendingRemoval: true }, { storageAvailable: false }, { actionLocked: true },
   ]) assert.equal(workflow.canRequestRemoval({ ...ready, ...patch }), false);
 });
@@ -79,6 +79,7 @@ test('un retrait bloque ON/OFF uniquement sur la lampe cible; pairing reste dist
   assert.equal(workflow.isRemovalBlockingCommand(11, 11), true);
   assert.equal(workflow.isRemovalBlockingCommand(12, 11), false);
   assert.equal(workflow.isCommandBlockingRemoval('uncertain'), true);
+  assert.equal(workflow.isCommandBlockingRemoval('tracking'), false);
   assert.equal(workflow.isCommandBlockingRemoval('executed'), false);
   assert.match(viewSource, /onPress=\{openPairing\}/);
 });

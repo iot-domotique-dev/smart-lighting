@@ -24,6 +24,13 @@ struct LampRemovalReceipt {
 
 constexpr uint8_t LAMP_REMOVAL_RECEIPT_VERSION = 1;
 
+enum class LampBrightnessLoadResult : uint8_t {
+    FOUND,
+    NOT_FOUND,
+    INVALID,
+    ERROR
+};
+
 class ProvisioningStore {
 public:
     virtual ~ProvisioningStore() = default;
@@ -33,6 +40,10 @@ public:
     virtual bool loadRemovalReceipt(LampRemovalReceipt& receipt) const = 0;
     virtual bool saveRemovalReceipt(const LampRemovalReceipt& receipt) = 0;
     virtual bool clearRemovalReceipt() = 0;
+    virtual LampBrightnessLoadResult loadLastNonzeroBrightness(
+        uint8_t& brightness
+    ) const = 0;
+    virtual bool saveLastNonzeroBrightness(uint8_t brightness) = 0;
 };
 
 /*
@@ -134,9 +145,13 @@ class MemoryProvisioningStore : public ProvisioningStore {
 private:
     ProvisioningRecord record;
     LampRemovalReceipt removalReceipt;
+    uint8_t lastNonzeroBrightness;
     bool hasRecord;
     bool hasRemovalReceipt;
+    bool hasLastNonzeroBrightness;
     bool failWrites;
+    bool failBrightnessReads;
+    uint32_t brightnessWriteAttemptCount;
 
 public:
     MemoryProvisioningStore();
@@ -146,5 +161,12 @@ public:
     bool loadRemovalReceipt(LampRemovalReceipt& receipt) const override;
     bool saveRemovalReceipt(const LampRemovalReceipt& receipt) override;
     bool clearRemovalReceipt() override;
+    LampBrightnessLoadResult loadLastNonzeroBrightness(
+        uint8_t& brightness
+    ) const override;
+    bool saveLastNonzeroBrightness(uint8_t brightness) override;
     void setFailWrites(bool fail);
+    void setFailBrightnessReads(bool fail);
+    void setStoredBrightnessForTest(uint8_t brightness);
+    uint32_t getBrightnessWriteAttemptCount() const;
 };

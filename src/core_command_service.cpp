@@ -42,6 +42,64 @@ bool hasPendingOutput(const MessageTracker& tracker, uint32_t destinationId) {
     return false;
 }
 
+uint8_t countPendingOutput(const MessageTracker& tracker,
+                           uint32_t destinationId,
+                           const PendingMessage** onlyPending = nullptr) {
+    uint8_t count = 0;
+    if (onlyPending != nullptr) *onlyPending = nullptr;
+    for (uint8_t index = 0; index < tracker.count; ++index) {
+        const PendingMessage& pending = tracker.messages[index];
+        if (pending.waitingForAck && isTrackedOutputCommand(pending.message) &&
+            pending.message.destinationId == destinationId) {
+            ++count;
+            if (onlyPending != nullptr) *onlyPending = &pending;
+        }
+    }
+    return count;
+}
+
+uint8_t countUnresolvedOutput(const MessageTracker& tracker,
+                              uint32_t destinationId,
+                              const PendingMessage** onlyPending = nullptr) {
+    uint8_t count = 0;
+    if (onlyPending != nullptr) *onlyPending = nullptr;
+    for (uint8_t index = 0; index < tracker.count; ++index) {
+        const PendingMessage& pending = tracker.messages[index];
+        if ((pending.waitingForAck || pending.timedOut) &&
+            isTrackedOutputCommand(pending.message) &&
+            pending.message.destinationId == destinationId) {
+            ++count;
+            if (onlyPending != nullptr) *onlyPending = &pending;
+        }
+    }
+    return count;
+}
+
+bool isPowerOff(const PendingMessage& pending) {
+    return pending.message.commandType ==
+               static_cast<int32_t>(ActionType::SET_LAMP_POWER) &&
+           pending.message.value == 0;
+}
+
+void completeSupersededCommand(MessageTracker& tracker,
+                               uint32_t supersededId,
+                               uint32_t destinationId) {
+    if (supersededId == 0) return;
+    PendingMessage* superseded = findPendingMessage(tracker, supersededId);
+    if (superseded == nullptr ||
+        superseded->message.destinationId != destinationId ||
+        !isTrackedOutputCommand(superseded->message) ||
+        superseded->completed) {
+        return;
+    }
+    superseded->waitingForAck = false;
+    superseded->completed = true;
+    superseded->timedOut = false;
+    superseded->message.executionStatus = ExecutionStatus::FAILED;
+    superseded->message.value2 = static_cast<int32_t>(ExecutionStatus::FAILED);
+    superseded->completedAt = millis();
+}
+
 bool applyConfirmedOutput(Device& lamp, const Message& command) {
     const bool isBrightness = command.commandType ==
         static_cast<int32_t>(ActionType::SET_LAMP_BRIGHTNESS);
@@ -143,21 +201,61 @@ CoreCommandError CoreCommandService::submitOutputCommand(uint32_t destinationId,
     if (findPendingMessage(tracker, command.id) != nullptr)
         return CoreCommandError::DUPLICATE_ID;
 
-    if (hasPendingOutput(tracker, destinationId))
+    const bool priorityOff = commandType ==
+        static_cast<int32_t>(ActionType::SET_LAMP_POWER) && value == 0;
+    const uint8_t pendingCount = countPendingOutput(tracker, destinationId);
+    const PendingMessage* unresolvedOutput = nullptr;
+    const uint8_t unresolvedCount = countUnresolvedOutput(
+        tracker, destinationId, &unresolvedOutput);
+    PendingMessage* superseded = unresolvedOutput == nullptr ? nullptr
+        : findPendingMessage(tracker, unresolvedOutput->message.id);
+    const bool canSupersede = priorityOff && unresolvedCount == 1 &&
+        superseded != nullptr && !superseded->priorityOff &&
+        !isPowerOff(*superseded);
+    if ((!priorityOff && pendingCount != 0) ||
+        (priorityOff && unresolvedCount != 0 && !canSupersede)) {
+        if (priorityOff) {
+            Serial.print("[CORE-COMMAND] priority OFF rejected: unresolved outputs=");
+            Serial.print(static_cast<unsigned>(unresolvedCount));
+            if (superseded != nullptr) {
+                Serial.print(" blocker=");
+                Serial.print(static_cast<unsigned long>(superseded->message.id));
+                Serial.print(" waiting=");
+                Serial.print(superseded->waitingForAck ? "yes" : "no");
+                Serial.print(" timed_out=");
+                Serial.print(superseded->timedOut ? "yes" : "no");
+                Serial.print(" priority_off=");
+                Serial.print(superseded->priorityOff ? "yes" : "no");
+            }
+            Serial.println();
+        }
         return CoreCommandError::COMMAND_IN_PROGRESS;
+    }
 
     if (!trackMessage(tracker, command)) return CoreCommandError::TRACKER_FULL;
     messageId = command.id;
+    PendingMessage* submitted = findPendingMessage(tracker, command.id);
+    if (priorityOff && superseded != nullptr) {
+        // value2 is already carried by the existing UART and Zigbee message
+        // formats. It identifies the one earlier output command that this OFF
+        // fences at LAMP if the earlier packet is still in transit.
+        command.value2 = static_cast<int32_t>(superseded->message.id);
+        if (submitted != nullptr) submitted->message.value2 = command.value2;
+    }
+    if (submitted != nullptr) submitted->priorityOff = priorityOff;
+    if (superseded != nullptr) superseded->supersededByPriorityOff = true;
     if (!sendMessage(link, command)) {
+        if (superseded != nullptr) superseded->supersededByPriorityOff = false;
+        if (submitted != nullptr) submitted->priorityOff = false;
         const Message failure = makeCoreCommandAck(command, CORE_LOGICAL_ID,
             ExecutionStatus::FAILED, CoreCommandError::TRANSPORT_FAILURE);
         (void)processAck(tracker, failure);
         return CoreCommandError::TRANSPORT_FAILURE;
     }
 
-    PendingMessage* submitted = findPendingMessage(tracker, command.id);
     if (submitted != nullptr) {
-        submitted->executionOrderAmbiguous = outputExecutionUnknown(*lamp);
+        submitted->executionOrderAmbiguous = outputExecutionUnknown(*lamp) &&
+            superseded == nullptr;
     }
     return CoreCommandError::NONE;
 }
@@ -178,15 +276,36 @@ bool CoreCommandService::handleReply(const Message& message) {
     const Message original = pending != nullptr ? pending->message : Message{};
     const bool executionOrderAmbiguous = pending != nullptr &&
         pending->executionOrderAmbiguous;
+    const bool priorityOff = pending != nullptr && pending->priorityOff;
+    const bool supersededByPriorityOff = pending != nullptr &&
+        pending->supersededByPriorityOff;
     if (!processAck(tracker, message)) return false;
 
-    if (!isTrackedOutputCommand(original) ||
-        message.executionStatus != ExecutionStatus::EXECUTED) {
+    if (!isTrackedOutputCommand(original)) {
         return true;
     }
 
     Device* lamp = findDeviceById(registry, original.destinationId);
     if (lamp == nullptr || !sameLampIdentity(*lamp, original)) return true;
+    if (supersededByPriorityOff &&
+        message.executionStatus == ExecutionStatus::EXECUTED) {
+        markLastConfirmedOutputStale(*lamp);
+        return true;
+    }
+    if (priorityOff && message.executionStatus == ExecutionStatus::FAILED) {
+        const uint32_t supersededId = static_cast<uint32_t>(original.value2);
+        PendingMessage* superseded = findPendingMessage(tracker, supersededId);
+        if (superseded != nullptr) superseded->supersededByPriorityOff = false;
+        markOutputExecutionUnknown(*lamp);
+        return true;
+    }
+    if (message.executionStatus != ExecutionStatus::EXECUTED) return true;
+    if (priorityOff && original.value2 != 0) {
+        lamp->powerExecutionUnknown = false;
+        lamp->brightnessExecutionUnknown = false;
+        completeSupersededCommand(tracker,
+            static_cast<uint32_t>(original.value2), original.destinationId);
+    }
     if (executionOrderAmbiguous || outputExecutionUnknown(*lamp)) {
         markLastConfirmedOutputStale(*lamp);
         return true;
@@ -203,6 +322,13 @@ bool CoreCommandService::hasUnresolvedPowerCommand(uint32_t destinationId) const
 
 bool CoreCommandService::hasUnresolvedOutputCommand(uint32_t destinationId) const {
     return hasUnresolvedPowerCommand(destinationId);
+}
+
+bool CoreCommandService::canBeginRemoval(uint32_t destinationId) const {
+    const Device* lamp = findDeviceById(registry, destinationId);
+    if (lamp == nullptr || lamp->role != DeviceRole::LAMP ||
+        outputExecutionUnknown(*lamp)) return false;
+    return countPendingOutput(tracker, destinationId) <= 1;
 }
 
 void CoreCommandService::poll() {

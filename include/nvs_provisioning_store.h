@@ -11,6 +11,10 @@ public:
     bool loadRemovalReceipt(LampRemovalReceipt& receipt) const override;
     bool saveRemovalReceipt(const LampRemovalReceipt& receipt) override;
     bool clearRemovalReceipt() override;
+    LampBrightnessLoadResult loadLastNonzeroBrightness(
+        uint8_t& brightness
+    ) const override;
+    bool saveLastNonzeroBrightness(uint8_t brightness) override;
 };
 
 /* Separate additive NVS namespace used only by MAIN ID allocation. */

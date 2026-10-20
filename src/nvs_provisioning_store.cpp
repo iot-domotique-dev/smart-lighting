@@ -8,6 +8,8 @@
 
 namespace {
 constexpr char NVS_NAMESPACE[] = "lamp_pairing";
+constexpr char LAMP_SETTINGS_NAMESPACE[] = "lamp_settings";
+constexpr char LAMP_BRIGHTNESS_KEY[] = "last_nonzero_v1";
 constexpr uint8_t RECORD_VERSION = 1;
 constexpr char KEY_VERSION[] = "version";
 constexpr char KEY_DEVICE_ID[] = "device_id";
@@ -170,6 +172,47 @@ bool NvsProvisioningStore::clearRemovalReceipt() {
     return result == ESP_OK;
 }
 
+LampBrightnessLoadResult NvsProvisioningStore::loadLastNonzeroBrightness(
+    uint8_t& brightness
+) const {
+    brightness = 0;
+    nvs_handle_t handle;
+    const esp_err_t openResult =
+        nvs_open(LAMP_SETTINGS_NAMESPACE, NVS_READONLY, &handle);
+    if (openResult == ESP_ERR_NVS_NOT_FOUND)
+        return LampBrightnessLoadResult::NOT_FOUND;
+    if (openResult != ESP_OK) return LampBrightnessLoadResult::ERROR;
+
+    uint8_t stored = 0;
+    const esp_err_t readResult =
+        nvs_get_u8(handle, LAMP_BRIGHTNESS_KEY, &stored);
+    nvs_close(handle);
+    if (readResult == ESP_ERR_NVS_NOT_FOUND)
+        return LampBrightnessLoadResult::NOT_FOUND;
+    if (readResult == ESP_ERR_NVS_TYPE_MISMATCH)
+        return LampBrightnessLoadResult::INVALID;
+    if (readResult != ESP_OK) return LampBrightnessLoadResult::ERROR;
+    if (stored < 1 || stored > 100)
+        return LampBrightnessLoadResult::INVALID;
+
+    brightness = stored;
+    return LampBrightnessLoadResult::FOUND;
+}
+
+bool NvsProvisioningStore::saveLastNonzeroBrightness(uint8_t brightness) {
+    if (brightness < 1 || brightness > 100) return false;
+
+    nvs_handle_t handle;
+    if (nvs_open(LAMP_SETTINGS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK)
+        return false;
+    const esp_err_t result = nvs_set_u8(
+        handle, LAMP_BRIGHTNESS_KEY, brightness) == ESP_OK
+        ? nvs_commit(handle)
+        : ESP_FAIL;
+    nvs_close(handle);
+    return result == ESP_OK;
+}
+
 bool NvsProvisioningReservationStore::load(
     uint32_t mainId,
     MainProvisioningReservationState& state
@@ -251,6 +294,17 @@ bool NvsProvisioningStore::saveRemovalReceipt(const LampRemovalReceipt&) {
 }
 
 bool NvsProvisioningStore::clearRemovalReceipt() {
+    return false;
+}
+
+LampBrightnessLoadResult NvsProvisioningStore::loadLastNonzeroBrightness(
+    uint8_t& brightness
+) const {
+    brightness = 0;
+    return LampBrightnessLoadResult::ERROR;
+}
+
+bool NvsProvisioningStore::saveLastNonzeroBrightness(uint8_t) {
     return false;
 }
 

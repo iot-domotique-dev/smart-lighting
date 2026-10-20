@@ -1,5 +1,7 @@
 # V7.8.0 — Luminosité PWM
 
+> Le comportement décrit ici a évolué avec V7.9.2, V7.9.4 et V7.9.5 : le dernier niveau non nul est conservé en NVS, les changements de luminosité passent par un fade LEDC asynchrone, OFF peut arrêter ce fade et le retrait force la sortie à LOW avant de persister le reçu. Voir [V7.9.2](#v792--persistance-du-dernier-niveau), [V7.9.4](#v794--transitions-progressives-ledc) et [V7.9.5](V7_9_5_OFF_PRIORITY.md).
+
 ## Périmètre et statut
 
 V7.8.0 regroupe la commande `SET_LAMP_BRIGHTNESS` de CORE-WIFI jusqu’à LAMP_C6, la route HTTP authentifiée, le contrôle depuis Android et le profil unique `lamp_c6` avec LEDC. La commande accepte un pourcentage entier de 0 à 100. Elle réutilise `MessageType::COMMAND`, `ActionType::SET_LAMP_BRIGHTNESS`, le champ `Message::value`, le tracker et les ACK existants. Les formats UART et Zigbee restent inchangés.
@@ -66,15 +68,15 @@ Une seule commande qui change la sortie peut attendre un résultat final par lam
 
 Le profil unique `lamp_c6` active LEDC basse vitesse, 5 kHz et résolution 10 bits sur GPIO18, uniquement pour le montage LED décrit ci-dessus. Les profils CORE et MAIN ne l’activent pas. La polarité active-haut (`SMART_LIGHTING_LED_PWM_ACTIVE_LOW=0`) correspond au branchement GPIO18 → résistance → anode LED → cathode vers GND. Chaque appel LEDC retourne les erreurs du pilote; celles-ci deviennent un résultat d’exécution `failed`, jamais un ACK `EXECUTED`. Si l’initialisation LEDC échoue, la sortie conserve le repli numérique ON/OFF et la lampe n’annonce pas `DEVICE_CAP_BRIGHTNESS`.
 
-Lorsque l’option PWM est activée sur un matériel vérifié :
+À la livraison V7.8.0, le dernier niveau non nul était gardé en RAM. Depuis V7.9.2, ce niveau est également sauvegardé dans la NVS dédiée de LAMP selon les règles de la section finale. Le comportement de sortie est le suivant :
 
 - `0` applique un duty de 0 et éteint la LED.
 - `100` applique le plafond configuré comme maximum autorisé. Les valeurs intermédiaires sont mises à l’échelle jusqu’à ce plafond; ce n’est pas nécessairement 100 % de duty électrique.
-- `SET_POWER OFF` applique 0 sans effacer le dernier niveau positif gardé en RAM.
-- `SET_POWER ON` restaure ce niveau RAM; la valeur par défaut après démarrage à froid est 100 %.
+- `SET_POWER OFF` applique 0 sans effacer le dernier niveau positif restauré en RAM.
+- `SET_POWER ON` restaure ce niveau; si la clé NVS est absente, invalide ou illisible, le défaut RAM est 100 %.
 - Un niveau positif reçu alors que la lampe est éteinte l’allume.
-- Le niveau n’est pas écrit en NVS; une variation ne provoque aucune écriture flash.
-- Au démarrage, GPIO est placé au niveau inactif correspondant à la polarité avant l’initialisation PWM. L’état RAM commence éteint; le dernier niveau non nul revient au défaut logiciel 100 %, qui ne dépasse pas le plafond configuré.
+- Une commande positive n’écrit la NVS que si sa valeur diffère de la dernière valeur effectivement sauvegardée. OFF, ON et brightness 0 ne provoquent pas d’écriture de luminosité.
+- Au démarrage, GPIO est placé à LOW avant l’initialisation PWM. La lecture du niveau sauvegardé ne rallume jamais la LED; la sortie reste éteinte jusqu’à une commande explicite.
 
 Pour un profil non PWM, brightness est refusé comme non pris en charge; le code ne simule pas une réussite et ne modifie pas la sortie digitale.
 
@@ -117,7 +119,7 @@ Le déplacement du curseur ne fait que changer la sélection locale. Un POST uni
 
 L’application réutilise `POST /api/v1/devices/{id}/commands/brightness`, le suivi existant `GET /api/v1/commands/{id}` et la relecture `GET /api/v1/devices/{id}`. `sent` et `accepted` restent en cours. Seul `executed` est un ACK d’exécution. Les états `failed`, `expired`, les réponses perdues et les erreurs de suivi ne deviennent pas un succès. Après un résultat incertain, l’application relit l’état par GET; si cette lecture échoue, elle garde la commande bloquée jusqu’à une relecture manuelle. Elle ne répète jamais automatiquement un POST. Les commandes ON/OFF et brightness partagent un seul verrou par lampe, sans bloquer les autres lampes.
 
-L’état de luminosité du firmware n’est gardé qu’en RAM. Après un redémarrage à froid de LAMP, l’application ne suppose pas que le dernier niveau a survécu; elle affiche les valeurs et statuts actuellement renvoyés par CORE. La consigne confirmée est une valeur logicielle, pas une mesure de lumière.
+Le dernier niveau positif est désormais conservé par LAMP; après un redémarrage de CORE, l’application ne connaît toutefois pas ce réglage tant qu’une commande n’a pas été confirmée et renvoyée par CORE. La consigne confirmée est une valeur logicielle, pas une mesure de lumière.
 
 Le Slider natif utilise `@react-native-community/slider` 5.2.0, version recommandée par la documentation Expo SDK 57. L’ajout change les dépendances JavaScript et natives de l’application, pas le firmware. Expo Go compatible SDK 57 inclut le Slider; un development client ou un binaire natif déjà installé doit être reconstruit pour y intégrer le module. Le bundling Android valide uniquement l’export JavaScript et ne remplace pas le test sur téléphone.
 
@@ -135,4 +137,76 @@ Avec une LAMP qui annonce `brightness`, son MAIN et CORE-WIFI disponibles sur le
 
 L’utilisateur confirme le parcours nominal Android → API HTTP → CORE-WIFI/UART → CORE-ZIGBEE/Zigbee → MAIN → LAMP et l’effet de variation sur la LED physique de GPIO18. Le profil `lamp_c6` est désormais le seul profil LAMP maintenu; le profil expérimental `lamp_c6_pwm_test` n’est plus dans `platformio.ini`. ON/OFF reste disponible. La validation V7.7 antérieure couvre l’appairage, le retrait, le réappairage et ON/OFF; ces parcours n’ont pas été rejoués pendant l’essai de luminosité.
 
-Cette validation concerne un MAIN et une LAMP. Elle ne couvre pas plusieurs lampes commandées simultanément, les pannes de transport, la concurrence, ni la récupération après coupure pendant une commande. Le dernier niveau PWM reste en RAM seulement : il n’est pas persisté en NVS après un redémarrage à froid de LAMP. `last_confirmed_state` décrit une confirmation logicielle, jamais une mesure électrique ou lumineuse.
+Cette validation concerne un MAIN et une LAMP. Elle ne couvre pas plusieurs lampes commandées simultanément, les pannes de transport, la concurrence, ni la récupération après coupure pendant une commande. À la clôture V7.8.0, le dernier niveau PWM restait en RAM seulement; sa persistance NVS a été ajoutée et validée sur matériel en V7.9.2 le 19 octobre 2026. `last_confirmed_state` décrit une confirmation logicielle, jamais une mesure électrique ou lumineuse.
+
+## V7.9.2 — Persistance du dernier niveau
+
+### Implémentation
+
+Le firmware LAMP réutilise `ProvisioningStore` et `NvsProvisioningStore`; aucun service de stockage parallèle ni changement de protocole n’est ajouté. Le niveau est stocké dans le namespace NVS `lamp_settings`, clé `last_nonzero_v1`, en `uint8_t` entre 1 et 100. La clé est séparée des namespaces `lamp_pairing`, `lamp_removal` et `zb_storage`; le partitionnement et les identifiants V7 ne changent pas.
+
+`LampState.lastNonzeroBrightness` est la source unique utilisée par `SET_POWER ON`. Le cache équivalent du pilote LEDC a été supprimé. Après initialisation GPIO à LOW et démarrage de NVS/Zigbee, le runtime charge et valide la valeur dans l’état LAMP sans écrire à la sortie. Si la clé est absente ou invalide, le niveau en RAM vaut 100 %, mais il n’est pas considéré comme déjà sauvegardé.
+
+Après application PWM réussie, une commande brightness positive compare la cible à la valeur réellement lue de NVS. Elle sauvegarde seulement une nouvelle valeur. Les commandes répétées identiques, OFF, ON et brightness 0 ne modifient pas la NVS. Une erreur de lecture empêche une écriture à l’aveugle; une erreur de `nvs_set_u8()` ou `nvs_commit()` est journalisée. La PWM appliquée et l’état RAM restent ceux de la commande exécutée, tandis que la valeur durable peut rester ancienne. L’ACK `EXECUTED` confirme l’application logicielle de la sortie, pas la réussite NVS. L’API actuelle ne fournit aucun statut de persistance et ne doit pas présenter `last_confirmed_state` comme preuve de sauvegarde ou de mesure physique.
+
+Chaque nouvelle consigne positive différente de la valeur sauvegardée entraîne une écriture NVS. Éviter les changements automatisés très fréquents; l’interface actuelle envoie une commande au relâchement du curseur, et les commandes identiques sont éliminées sans écriture.
+
+Le retrait efface l’association dans `lamp_pairing` et ne supprime pas le réglage `lamp_settings`. Le même appareil physique retrouve donc son dernier niveau lors du réappairage, même s’il reçoit un nouvel ID local/V7. Le firmware ne rallume pas la LED pendant le retrait, le réappairage ou le démarrage. Un downgrade vers V7.8.0 ignore cette clé et revient à son défaut RAM de 100 %; il ne l’efface pas.
+
+### Validation native et compilation
+
+La validation native ciblée réussit : `test_stabilization` passe 14/14 et `test_v4_pairing` passe 31/31. Elle couvre la sauvegarde et la restauration de 35 %, le démarrage éteint, ON/OFF, brightness 0, l’absence d’écriture redondante, les valeurs absentes/invalides, l’erreur de lecture et l’échec simulé d’écriture. Le scénario de retrait/réappairage vérifie la conservation du niveau et la réattribution d’un ID distinct. La suite native complète n’a pas été relancée. Ces tests n’émulent pas les coupures électriques réelles, les erreurs physiques de flash ni le comportement d’une carte.
+
+Les quatre compilations PlatformIO complètes ont réussi pour `core_wifi_c6`, `core_zigbee_c6`, `main_light_c6` et `lamp_c6`. Les tailles déclarées par l’outil de build et leurs marges de partition sont :
+
+| Profil | Flash utilisée / partition | Marge flash | RAM statique / disponible |
+|---|---:|---:|---:|
+| `core_wifi_c6` | 1 016 848 / 1 048 576 octets | 31 728 octets | 75 604 / 327 680 octets |
+| `core_zigbee_c6` | 554 370 / 1 966 080 octets | 1 411 710 octets | 34 348 / 327 680 octets |
+| `main_light_c6` | 540 070 / 1 966 080 octets | 1 426 010 octets | 34 020 / 327 680 octets |
+| `lamp_c6` | 555 176 / 1 966 080 octets | 1 410 904 octets | 34 236 / 327 680 octets |
+
+Les binaires complets ont été produits dans `.pio/build/<profil>/firmware.bin`. CORE-WIFI conserve une marge flash réduite de 31 728 octets; recompiler et vérifier cette marge avant chaque déploiement. Ces builds vérifient la compilation et la taille des images, pas leur démarrage ni leur comportement sur cartes. Aucun flash ou effacement NVS n’a été effectué pour V7.9.2.
+
+### Procédure matérielle proposée
+
+Avec une seule LAMP_C6 utilisant le circuit LED GPIO18 documenté et une sauvegarde non destructive des données existantes :
+
+1. Démarrer LAMP et vérifier que la LED reste éteinte pendant le boot; conserver les logs de démarrage.
+2. Depuis l’application, commander 35 % et attendre l’état de commande `executed` ainsi que la confirmation `brightness_percent: 35` renvoyée par CORE.
+3. Commander OFF et confirmer que la LED s’éteint.
+4. Redémarrer uniquement LAMP sans effacer la NVS ni retirer l’association. Vérifier qu’elle reste éteinte après le boot.
+5. Commander ON et vérifier que la LED revient à 35 %. Vérifier l’ACK et l’état remonté par CORE; cela valide fonctionnellement la restauration, pas une mesure électrique.
+6. Régler une nouvelle valeur positive, par exemple 40 %, puis retirer et réappairer cette même carte seulement si cette rétention après retrait doit être vérifiée. Confirmer que le nouvel ID est différent et qu’un ON ultérieur restaure 40 %.
+
+Ne pas lancer ces manipulations pendant qu’une commande a un résultat incertain.
+
+### Validation matérielle V7.9.2 — 19 octobre 2026
+
+L’utilisateur a confirmé le scénario nominal sur le matériel : l’association Zigbee est restée présente; la luminosité a été réglée à 35 %; la LED est restée éteinte au redémarrage de LAMP_C6; une nouvelle commande `ON` a restauré 35 %. Aucun réappairage n’a été nécessaire. Cela valide la conservation/restauration du niveau au redémarrage pour ce montage et ce parcours.
+
+Cette validation ne couvre pas une coupure précisément pendant `nvs_set_u8()` ou `nvs_commit()`, une erreur NVS forcée, plusieurs lampes simultanées ni une mesure du courant/luminosité. Le résultat `EXECUTED` et `last_confirmed_state` confirment toujours la commande logicielle exécutée, et ne constituent pas une preuve électrique ni un accusé spécifique de commit NVS.
+
+## V7.9.4 — Transitions progressives LEDC
+
+### Comportement implémenté
+
+Le profil `lamp_c6` utilise le fade matériel LEDC asynchrone, sur la même sortie GPIO18 à 5 kHz et 10 bits. Aucun nouveau transport, format de message, endpoint HTTP, tâche FreeRTOS ni mécanisme de persistance parallèle n’est ajouté. La boucle normale de LAMP observe le callback de fin; le callback ne fait qu’enregistrer le duty final et un compteur d’événement. Le duty n’est pas interrogé à chaque tour de boucle.
+
+La durée est proportionnelle à la différence entre le niveau courant connu et la cible : environ 1 000 ms pour 100 points de variation, avec un minimum de 100 ms et un maximum de 1 000 ms. Ainsi, les transitions 0→100, 100→0, 20→80 et 80→30 sont exécutées localement par LAMP. `SET_POWER ON` rejoint progressivement le dernier niveau positif; `SET_LAMP_BRIGHTNESS 0` descend progressivement à zéro. `SET_POWER OFF` reste immédiat lorsque la sortie est au repos et devient prioritaire lorsqu’un fade est actif. Les commandes ON et brightness concurrentes restent refusées avec le résultat existant `command_in_progress`.
+
+L’ACK final `EXECUTED` est envoyé seulement après un callback dont le duty correspond à la cible et dont la lecture LEDC concorde. L’ACK `accepted` de CORE reste non terminal. Une retransmission de la même commande pendant le fade ne redémarre pas la transition et n’émet pas de résultat prématuré; après finalisation, le résultat terminal mémorisé est rejoué par la déduplication existante. Le watchdog de 3 500 ms réalise une lecture unique du duty pour accepter une fin dont le callback aurait été perdu. Si la cible n’a pas été atteinte, le fade est arrêté et l’ancien niveau est restauré; une erreur d’arrêt ou de restauration laisse le résultat incertain, verrouille les commandes de sortie et supprime l’ACK final afin que CORE termine en `execution_unknown` plutôt que d’affirmer un succès.
+
+Une erreur LEDC au démarrage de fade entraîne une tentative d’arrêt et de restauration du niveau antérieur, puis un ACK `FAILED` si cette restauration est confirmée. Si le pilote de fade est indisponible mais que la sortie PWM est opérationnelle, le firmware conserve la compatibilité en appliquant immédiatement la valeur PWM et journalise ce repli. Une erreur ou absence de confirmation ne doit jamais être interprétée comme une transition terminée.
+
+Les niveaux intermédiaires ne sont pas écrits en NVS. Le niveau positif final est persisté uniquement lorsque son application est terminée; brightness 0 et OFF conservent le niveau positif antérieur. Au redémarrage, la sortie reste LOW; le niveau sauvegardé est repris par une nouvelle commande ON. Une erreur de persistance NVS suit les limites documentées en V7.9.2 : l’ACK confirme l’application de la sortie, pas le commit durable.
+
+### Validation logicielle et limites
+
+Après V7.9.4, `test_stabilization` comptait 34 tests. V7.9.5 ajoute trois scénarios de mise en sécurité avant retrait; la suite compte maintenant **40/40 réussis**. Les cas ajoutés couvrent une montée interrompue, une descente interrompue et la mise à LOW lorsque la sortie était déjà éteinte. Ils vérifient aussi l’absence d’écriture NVS pour les niveaux intermédiaires et l’ignorance d’un callback de l’ancienne génération après retrait. La simulation vérifie la logique de commande et les réponses; elle ne simule ni la forme d’onde PWM réelle ni une interruption radio physique. Le détail des huit suites natives, mobile et builds V7.9.5 figure dans le [dossier OFF prioritaire](V7_9_5_OFF_PRIORITY.md#vérification-et-limites).
+
+La compilation PlatformIO complète `lamp_c6` n’a pas abouti et aucun `firmware.bin` ou ELF final n’a été confirmé. Sous Windows, ESP-IDF échoue pendant la génération de `sections.ld` avec « La ligne de commande est trop longue » : la commande batch générée contenait une ligne d’environ 9 449 caractères. Le raccourcissement du seul dossier de sortie n’a pas suffi, car les chemins répétés des fragments ESP-IDF restent longs; un wrapper temporaire du script généré n’a pas permis d’obtenir un build complet. Le build matériel reste donc non vérifié. Les tests natifs ne remplacent pas cette compilation. Aucun flash n’a été effectué pour V7.9.4.
+
+La validation matérielle des interruptions OFF et du retrait pendant un fade reste à réaliser sur le banc LED basse tension GPIO18, après vérification électrique. Les séquences de panne, callback perdu, commandes réordonnées et reset au milieu d’un fade ne sont pas encore validées physiquement. Le retrait appelle désormais l’arrêt du fade et exige le succès de l’écriture OFF avant la création ou la reprise du reçu durable. Si le pilote ne confirme pas l’arrêt ou l’écriture, le retrait est rejeté et l’association reste conservée. Cette confirmation concerne le pilote, pas une mesure du courant ou de l’état lumineux réel. Voir [V7.9.5](V7_9_5_OFF_PRIORITY.md) pour les règles et limites.
+
+Le statut `EXECUTED` signifie que le pilote LEDC a confirmé la fin logicielle sur la cible de duty. Il ne mesure ni le courant, ni la lumière, ni l’état électrique réel de la LED.

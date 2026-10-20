@@ -755,10 +755,10 @@ esp_err_t CoreHttpApi::handleRemovalRequest(httpd_req_t* request) {
             return sendError(request, 409, "offline",
                              "The lamp or its MAIN module is offline.");
         }
-        if (!duplicate && commands.hasUnresolvedPowerCommand(target->id)) {
+        if (!duplicate && !commands.canBeginRemoval(target->id)) {
             (void)xSemaphoreGive(*registryMutex);
             return sendError(request, 409, "command_unresolved",
-                "A power command is pending or its execution is unknown for this lamp.");
+                "The lamp has an OFF command or an output result that is still unresolved.");
         }
         if (duplicate && removalTargetId == 0) {
             removalTargetId = target->id;

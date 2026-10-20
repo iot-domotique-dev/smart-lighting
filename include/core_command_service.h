@@ -21,6 +21,7 @@ public:
     bool handleReply(const Message& message);
     bool hasUnresolvedPowerCommand(uint32_t destinationId) const;
     bool hasUnresolvedOutputCommand(uint32_t destinationId) const;
+    bool canBeginRemoval(uint32_t destinationId) const;
     void poll();
 };
 

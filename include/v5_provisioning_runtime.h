@@ -3,6 +3,7 @@
 #include "communication.h"
 #include "device_registry.h"
 #include "message_tracker.h"
+#include "message_deduplicator.h"
 #include "provisioning.h"
 #include "core_pairing_protocol.h"
 
@@ -11,6 +12,7 @@ private:
     Communication& communication;
     LampRegistry& lamps;
     MessageTracker& tracker;
+    MessageDeduplicator& deduplicator;
     DeviceRole role;
     ProvisioningStore* lampStore;
     ProvisioningReservationStore* reservationStore;
@@ -60,7 +62,8 @@ public:
     V5ProvisioningRuntime(
         Communication& communication,
         LampRegistry& lamps,
-        MessageTracker& tracker
+        MessageTracker& tracker,
+        MessageDeduplicator& deduplicator
     );
 
     bool begin(

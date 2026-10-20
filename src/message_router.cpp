@@ -7,6 +7,8 @@
 #include "device_manager.h"
 #include "event_bus.h"
 #include "core_command_protocol.h"
+#include "lamp_controller.h"
+#include "lamp_hardware.h"
 
 namespace {
 constexpr uint8_t MAX_APPLICATION_MESSAGE_HANDLERS = 4;
@@ -142,6 +144,117 @@ static void sendCoreExecutionAck(
     }
 }
 
+namespace {
+bool isLampOutputAction(ActionType type) {
+    return type == ActionType::SET_LAMP_POWER ||
+           type == ActionType::SET_LAMP_BRIGHTNESS;
+}
+
+void bindProcessedCommand(ProcessedMessage& entry, const Message& command) {
+    entry.destinationId = command.destinationId;
+    entry.parentMainId = command.parentMainId;
+    entry.provisioningDeviceId = command.provisioningDeviceId;
+    entry.commandType = command.commandType;
+    entry.value = command.value;
+    entry.hasCommandIdentity = true;
+}
+
+Message restoreTransitionCommand(const LampOutputTransition& transition,
+                                const ProcessedMessage& entry) {
+    Message command = {};
+    command.id = transition.messageId;
+    command.sourceId = transition.sourceId;
+    command.destinationId = entry.destinationId;
+    command.type = MessageType::COMMAND;
+    command.timestamp = entry.processedAt;
+    command.commandType = entry.commandType;
+    command.value = entry.value;
+    command.parentMainId = entry.parentMainId;
+    command.provisioningDeviceId = entry.provisioningDeviceId;
+    command.executionStatus = ExecutionStatus::NOT_EXECUTED;
+    return command;
+}
+
+void finishInterruptedTransition(Communication& communication,
+                                 MessageDeduplicator& deduplicator,
+                                 Lamp& lamp,
+                                 const LampOutputTransition& transition,
+                                 ExecutionStatus result) {
+    ProcessedMessage* entry = findProcessedMessage(
+        deduplicator, transition.sourceId, transition.messageId);
+    if (entry == nullptr || !entry->hasCommandIdentity) {
+        lamp.outputTransition.faulted = true;
+        Serial.println("[LAMP] interrupted fade has no deduplication identity; ACK withheld");
+        return;
+    }
+    (void)registerProcessedMessage(deduplicator, transition.sourceId,
+                                   transition.messageId, result);
+    const Message command = restoreTransitionCommand(transition, *entry);
+    if (transition.coreCommand) {
+        sendCoreExecutionAck(communication, command,
+            lamp.identity.parentMainId, result, CoreCommandError::NONE,
+            transition.dropAck);
+    } else {
+        sendAck(communication, command, result, transition.dropAck);
+    }
+}
+
+bool installSupersededCommandTombstone(MessageDeduplicator& deduplicator,
+                                      uint32_t sourceId,
+                                      uint32_t supersededMessageId) {
+    if (supersededMessageId == 0) return true;
+    constexpr uint32_t RETRY_PROTECTION_MS = 60000;
+    ProcessedMessage* entry = findProcessedMessage(
+        deduplicator, sourceId, supersededMessageId);
+    if (entry == nullptr) {
+        if (!reserveProcessedMessage(deduplicator, sourceId,
+                                     supersededMessageId,
+                                     RETRY_PROTECTION_MS)) {
+            return false;
+        }
+        entry = findProcessedMessage(deduplicator, sourceId,
+                                     supersededMessageId);
+    }
+    if (entry == nullptr) return false;
+
+    // The prior command may already be in the LAMP fade, may be waiting in
+    // the radio path, or may have completed. Preserve a final cached result;
+    // convert a pending/empty reservation into a non-executable tombstone.
+    if (entry->executionStatus == ExecutionStatus::NOT_EXECUTED) {
+        (void)registerProcessedMessage(deduplicator, sourceId,
+                                       supersededMessageId,
+                                       ExecutionStatus::FAILED);
+    }
+    entry = findProcessedMessage(deduplicator, sourceId,
+                                 supersededMessageId);
+    return entry != nullptr &&
+           entry->executionStatus != ExecutionStatus::NOT_EXECUTED;
+}
+
+bool startTransitionForMessage(
+    Message& command,
+    Lamp& lamp,
+    MessageDeduplicator& deduplicator,
+    bool coreCommand,
+    bool dropAck,
+    LampOutputTransitionResult& result
+) {
+    constexpr uint32_t RETRY_PROTECTION_MS = 60000;
+    if (!reserveProcessedMessage(deduplicator, command.sourceId, command.id,
+                                 RETRY_PROTECTION_MS)) {
+        return false;
+    }
+    ProcessedMessage* entry = findProcessedMessage(
+        deduplicator, command.sourceId, command.id);
+    if (entry == nullptr) return false;
+    bindProcessedCommand(*entry, command);
+    result = beginLampOutputTransition(
+        lamp, static_cast<ActionType>(command.commandType), command.value,
+        command.sourceId, command.id, coreCommand, dropAck);
+    return true;
+}
+}  // namespace
+
 
 /*
  * ============================================================
@@ -269,6 +382,11 @@ void processMessages(
                     processed->commandType == message.commandType &&
                     processed->value == message.value;
                 if (!sameCommand) {
+                    if (processed->executionStatus ==
+                        ExecutionStatus::NOT_EXECUTED) {
+                        Serial.println("[LAMP] conflicting duplicate ignored while original output is pending");
+                        continue;
+                    }
                     sendCoreExecutionAck(communication, message, replyHop,
                                          ExecutionStatus::FAILED,
                                          CoreCommandError::DUPLICATE_ID, dropNextAck);
@@ -309,6 +427,79 @@ void processMessages(
             reserved->commandType = message.commandType;
             reserved->value = message.value;
             reserved->hasCommandIdentity = true;
+
+            const ActionType commandType =
+                static_cast<ActionType>(message.commandType);
+            Lamp* outputLamp = findLamp(lamps, targetId);
+
+            if (outputLamp != nullptr &&
+                commandType == ActionType::SET_LAMP_POWER &&
+                message.value == 0 &&
+                (message.value2 != 0 || outputLamp->outputTransition.active ||
+                 outputLamp->outputTransition.faulted)) {
+                const uint32_t supersededId =
+                    static_cast<uint32_t>(message.value2);
+                const bool supersededFenced =
+                    installSupersededCommandTombstone(
+                        deduplicator, message.sourceId, supersededId);
+                LampOutputInterruption interruption = {};
+                const LampOutputOffResult offResult = forceLampOutputOff(
+                    *outputLamp, millis(), interruption);
+                if (interruption.hadTransition &&
+                    (interruption.transitionCompleted ||
+                     interruption.transitionStopped)) {
+                    finishInterruptedTransition(communication, deduplicator,
+                        *outputLamp, interruption.transition,
+                        interruption.transitionCompleted
+                            ? ExecutionStatus::EXECUTED
+                            : ExecutionStatus::FAILED);
+                }
+                const bool offApplied = offResult == LampOutputOffResult::APPLIED;
+                const ExecutionStatus result = offApplied && supersededFenced
+                    ? ExecutionStatus::EXECUTED : ExecutionStatus::FAILED;
+                (void)registerProcessedMessage(deduplicator, message.sourceId,
+                                               message.id, result);
+                sendCoreExecutionAck(communication, message, replyHop, result,
+                    !supersededFenced ? CoreCommandError::DEDUP_FULL
+                                      : CoreCommandError::NONE,
+                    dropNextAck);
+                dropNextAck = false;
+                continue;
+            }
+
+            if (outputLamp != nullptr && lampHardwareSupportsBrightness() &&
+                isLampOutputAction(commandType)) {
+                const LampOutputTransitionResult transitionResult =
+                    beginLampOutputTransition(
+                        *outputLamp, commandType, message.value,
+                        message.sourceId, message.id, true, dropNextAck);
+                if (transitionResult == LampOutputTransitionResult::STARTED) {
+                    dropNextAck = false;
+                    continue;
+                }
+                if (transitionResult == LampOutputTransitionResult::UNCERTAIN) {
+                    dropNextAck = false;
+                    continue;
+                }
+                if (transitionResult == LampOutputTransitionResult::BUSY) {
+                    (void)registerProcessedMessage(deduplicator,
+                        message.sourceId, message.id, ExecutionStatus::FAILED);
+                    sendCoreExecutionAck(communication, message, replyHop,
+                        ExecutionStatus::FAILED,
+                        CoreCommandError::COMMAND_IN_PROGRESS, dropNextAck);
+                    dropNextAck = false;
+                    continue;
+                }
+                const ExecutionStatus result = transitionResult ==
+                    LampOutputTransitionResult::COMPLETED
+                    ? ExecutionStatus::EXECUTED : ExecutionStatus::FAILED;
+                (void)registerProcessedMessage(deduplicator, message.sourceId,
+                                               message.id, result);
+                sendCoreExecutionAck(communication, message, replyHop, result,
+                                     CoreCommandError::NONE, dropNextAck);
+                dropNextAck = false;
+                continue;
+            }
 
             const Action action = {
                 static_cast<ActionType>(message.commandType), targetId, message.value
@@ -373,6 +564,21 @@ void processMessages(
         if (
             processed != nullptr
         ) {
+
+            if (processed->hasCommandIdentity &&
+                processed->executionStatus == ExecutionStatus::NOT_EXECUTED) {
+                const bool sameCommand =
+                    processed->destinationId == message.destinationId &&
+                    processed->commandType == message.commandType &&
+                    processed->value == message.value;
+                if (!sameCommand) {
+                    Serial.println("[LAMP] conflicting duplicate ignored while original output is pending");
+                    continue;
+                }
+                // The original output transition is still running. Do not
+                // restart it and do not turn a retry into a terminal ACK.
+                continue;
+            }
 
             Serial.println();
 
@@ -439,6 +645,84 @@ void processMessages(
             message.value
         };
 
+        const ActionType commandType = action.type;
+        Lamp* outputLamp = findLamp(lamps, action.targetId);
+        if (outputLamp != nullptr &&
+            commandType == ActionType::SET_LAMP_POWER && message.value == 0 &&
+            (outputLamp->outputTransition.active ||
+             outputLamp->outputTransition.faulted)) {
+            constexpr uint32_t RETRY_PROTECTION_MS = 60000;
+            if (!reserveProcessedMessage(deduplicator, message.sourceId,
+                                         message.id, RETRY_PROTECTION_MS)) {
+                sendAck(communication, message, ExecutionStatus::FAILED,
+                        dropNextAck);
+                dropNextAck = false;
+                continue;
+            }
+            ProcessedMessage* reserved = findProcessedMessage(
+                deduplicator, message.sourceId, message.id);
+            if (reserved == nullptr) {
+                sendAck(communication, message, ExecutionStatus::FAILED,
+                        dropNextAck);
+                dropNextAck = false;
+                continue;
+            }
+            bindProcessedCommand(*reserved, message);
+            LampOutputInterruption interruption = {};
+            const LampOutputOffResult offResult = forceLampOutputOff(
+                *outputLamp, millis(), interruption);
+            if (interruption.hadTransition &&
+                (interruption.transitionCompleted ||
+                 interruption.transitionStopped)) {
+                finishInterruptedTransition(communication, deduplicator,
+                    *outputLamp, interruption.transition,
+                    interruption.transitionCompleted
+                        ? ExecutionStatus::EXECUTED
+                        : ExecutionStatus::FAILED);
+            }
+            const ExecutionStatus result = offResult ==
+                LampOutputOffResult::APPLIED
+                ? ExecutionStatus::EXECUTED : ExecutionStatus::FAILED;
+            (void)registerProcessedMessage(deduplicator, message.sourceId,
+                                           message.id, result);
+            sendAck(communication, message, result, dropNextAck);
+            dropNextAck = false;
+            continue;
+        }
+        if (outputLamp != nullptr && lampHardwareSupportsBrightness() &&
+            isLampOutputAction(commandType)) {
+            LampOutputTransitionResult transitionResult =
+                LampOutputTransitionResult::FAILED;
+            if (outputLamp->device.status != DeviceStatus::ONLINE) {
+                transitionResult = LampOutputTransitionResult::FAILED;
+            } else if (!startTransitionForMessage(message, *outputLamp,
+                                                  deduplicator, false,
+                                                  dropNextAck,
+                                                  transitionResult)) {
+                sendAck(communication, message, ExecutionStatus::FAILED,
+                        dropNextAck);
+                dropNextAck = false;
+                continue;
+            }
+
+            if (transitionResult == LampOutputTransitionResult::STARTED) {
+                dropNextAck = false;
+                continue;
+            }
+            if (transitionResult == LampOutputTransitionResult::UNCERTAIN) {
+                dropNextAck = false;
+                continue;
+            }
+            const ExecutionStatus result = transitionResult ==
+                LampOutputTransitionResult::COMPLETED
+                ? ExecutionStatus::EXECUTED : ExecutionStatus::FAILED;
+            (void)registerProcessedMessage(deduplicator, message.sourceId,
+                                           message.id, result);
+            sendAck(communication, message, result, dropNextAck);
+            dropNextAck = false;
+            continue;
+        }
+
 
         Serial.println(
             ">>> EXECUTION COMMANDE"
@@ -502,4 +786,50 @@ void processMessages(
 
         dropNextAck = false;
     }
+}
+
+void pollLampTransitions(Communication& communication,
+                         MessageDeduplicator& deduplicator,
+                         LampRegistry& lamps) {
+    for (uint8_t index = 0; index < lamps.count; ++index) {
+        Lamp& lamp = lamps.lamps[index];
+        if (!lamp.outputTransition.active) continue;
+        const LampOutputTransition transition = lamp.outputTransition;
+        const LampOutputTransitionPollResult result =
+            pollLampOutputTransition(lamp, millis());
+        if (result == LampOutputTransitionPollResult::NONE ||
+            result == LampOutputTransitionPollResult::UNCERTAIN) {
+            continue;
+        }
+
+        ProcessedMessage* entry = findProcessedMessage(
+            deduplicator, transition.sourceId, transition.messageId);
+        if (entry == nullptr || !entry->hasCommandIdentity) {
+            lamp.outputTransition.faulted = true;
+            Serial.println("[LAMP] transition result has no deduplication identity; final ACK withheld");
+            continue;
+        }
+        const ExecutionStatus execution = result ==
+            LampOutputTransitionPollResult::EXECUTED
+            ? ExecutionStatus::EXECUTED : ExecutionStatus::FAILED;
+        (void)registerProcessedMessage(deduplicator, transition.sourceId,
+                                       transition.messageId, execution);
+        const Message command = restoreTransitionCommand(transition, *entry);
+        if (transition.coreCommand) {
+            sendCoreExecutionAck(communication, command,
+                lamp.identity.parentMainId, execution,
+                CoreCommandError::NONE, transition.dropAck);
+        } else {
+            sendAck(communication, command, execution, transition.dropAck);
+        }
+    }
+}
+
+void finishLampOutputTransition(Communication& communication,
+                                MessageDeduplicator& deduplicator,
+                                Lamp& lamp,
+                                const LampOutputTransition& transition,
+                                ExecutionStatus result) {
+    finishInterruptedTransition(communication, deduplicator, lamp,
+                                transition, result);
 }

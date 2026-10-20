@@ -93,7 +93,7 @@ export function createRemovalConfirmation(deviceName: string, deviceId: V7Id)
   : { title: string; message: string } {
   return {
     title: 'Retirer cette lampe ?',
-    message: `Nom : ${deviceName}\nIdentifiant : ${deviceId}\n\nElle sera retirée de Smart Lighting et pourra être ajoutée à nouveau ultérieurement. Ce retrait n’éteint pas la sortie électrique.`,
+    message: `Nom : ${deviceName}\nIdentifiant : ${deviceId}\n\nElle sera retirée de Smart Lighting et pourra être ajoutée à nouveau ultérieurement. Avant le désappairage, la lampe tentera d’arrêter un fade actif et de forcer sa sortie GPIO à l’état bas. Si cette extinction ne peut pas être confirmée par le pilote, le retrait sera refusé. Cela ne mesure pas l’état électrique de la LED.`,
   };
 }
 
@@ -102,8 +102,9 @@ export function isRemovalBlockingCommand(deviceId: V7Id, removalDeviceId?: V7Id)
 }
 
 export function isCommandBlockingRemoval(phase?: string): boolean {
-  return phase === 'submitting' || phase === 'tracking' || phase === 'refreshing' ||
-    phase === 'uncertain';
+  // LAMP stops and drives its output low before acknowledging secure unpair.
+  // Keep blocking while a POST is in flight or the command result is uncertain.
+  return phase === 'submitting' || phase === 'refreshing' || phase === 'uncertain';
 }
 
 export function isRemovalInProgress(state: string): boolean {

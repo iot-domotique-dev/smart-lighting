@@ -3,7 +3,7 @@ import { useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import type { LampRecord, PowerState } from '../../api/types';
 import { StatusIndicator } from '../../components/StatusIndicator';
-import { isCommandInProgress } from './commandPolling';
+import { canInterruptWithPriorityOff, isCommandInProgress } from './commandPolling';
 import type { LampCommandFeedback } from './commandPolling';
 import { brightnessDisplay, brightnessSliderKey, canControlBrightness, normalizeBrightnessPercent,
   shouldSubmitBrightnessOnRelease, supportsBrightness } from './brightnessControl';
@@ -14,7 +14,8 @@ function feedbackText(feedback?: LampCommandFeedback): string | null {
     ? `Luminosité ${feedback.brightnessPercent} %` : feedback.requested.toUpperCase();
   if (feedback.phase === 'submitting') return `Envoi de ${requested}…`;
   if (feedback.phase === 'tracking') {
-    return `${requested} · ${feedback.commandState} · ${feedback.retries} reprise(s)`;
+    return `${requested} · ${feedback.commandState} · ${feedback.retries} reprise(s)${
+      feedback.priorityOffError ? ` · OFF prioritaire refusé : ${feedback.priorityOffError}` : ''}`;
   }
   if (feedback.phase === 'refreshing') return feedback.message;
   if (feedback.phase === 'executed') {
@@ -44,6 +45,8 @@ export function LampCard({ lamp, mainOnline, snapshotOld, feedback,
     history.status === 'stale' ? 'À vérifier' : 'Inconnu';
   const busy = isCommandInProgress(feedback);
   const canControl = !busy && !powerBlockedByRemoval && !snapshotOld && lamp.online && mainOnline;
+  const canPriorityOff = canInterruptWithPriorityOff(feedback) &&
+    !powerBlockedByRemoval && !snapshotOld && lamp.online && mainOnline;
   const canControlLampBrightness = canControlBrightness(lamp, mainOnline, !snapshotOld,
     busy || powerBlockedByRemoval);
   const selectionKey = brightnessSliderKey(lamp.id, brightness);
@@ -108,9 +111,10 @@ export function LampCard({ lamp, mainOnline, snapshotOld, feedback,
           <Text style={styles.onText}>Allumer</Text>
         </Pressable>
         <Pressable style={({ pressed }) => [styles.powerButton, styles.offButton,
-          (!canControl || pressed) && styles.buttonDim]}
-          onPress={() => onPower('off')} disabled={!canControl}
-          accessibilityRole="button" accessibilityLabel={`Éteindre ${lamp.name}`}>
+          (!(canControl || canPriorityOff) || pressed) && styles.buttonDim]}
+          onPress={() => onPower('off')} disabled={!(canControl || canPriorityOff)}
+          accessibilityRole="button" accessibilityLabel={canPriorityOff
+            ? `Éteindre en priorité ${lamp.name}` : `Éteindre ${lamp.name}`}>
           <Text style={styles.offText}>Éteindre</Text>
         </Pressable>
       </View>

@@ -86,7 +86,8 @@ MessageDeduplicator messageDeduplicator;
 V5ProvisioningRuntime v5ProvisioningRuntime(
     communication,
     lampRegistry,
-    messageTracker
+    messageTracker,
+    messageDeduplicator
 );
 
 #if defined(SMART_LIGHTING_CORE_WIFI)
@@ -306,6 +307,10 @@ void loop() {
         false,
         &eventBus
     );
+
+#if defined(DEVICE_ROLE_LAMP)
+    pollLampTransitions(communication, messageDeduplicator, lampRegistry);
+#endif
 
     updateMessageTimeouts(
         messageTracker,
