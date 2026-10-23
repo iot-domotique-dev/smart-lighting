@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core_command_protocol.h"
+#include "group_protocol.h"
 #include "message_tracker.h"
 
 class CoreCommandService {
@@ -22,6 +23,9 @@ public:
     bool hasUnresolvedPowerCommand(uint32_t destinationId) const;
     bool hasUnresolvedOutputCommand(uint32_t destinationId) const;
     bool canBeginRemoval(uint32_t destinationId) const;
+    void applyGroupPowerResult(uint32_t mainCoreId, uint32_t lampLocalId,
+                               bool power, uint32_t operationStartedAt,
+                               GroupProtocolResult result);
     void poll();
 };
 

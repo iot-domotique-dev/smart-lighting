@@ -1,4 +1,5 @@
 #include <string.h>
+#include <stddef.h>
 
 #include "nvs_provisioning_store.h"
 
@@ -19,8 +20,128 @@ constexpr char KEY_PARENT_MAIN_ID[] = "parent_main_id";
 constexpr char KEY_PAIRING_STATE[] = "pairing_state";
 constexpr char MAIN_NVS_NAMESPACE[] = "main_pairing";
 constexpr char MAIN_RESERVATIONS_KEY[] = "reservations";
+constexpr char MAIN_GROUPS_NAMESPACE[] = "main_groups";
+constexpr char MAIN_GROUPS_SLOT_A[] = "groups_slot_a";
+constexpr char MAIN_GROUPS_SLOT_B[] = "groups_slot_b";
+constexpr uint32_t MAIN_GROUPS_MAGIC = 0x534C4752UL;  // "SLGR"
+constexpr uint16_t MAIN_GROUPS_FORMAT_VERSION = 1;
 constexpr char LAMP_REMOVAL_NAMESPACE[] = "lamp_removal";
 constexpr char LAMP_REMOVAL_KEY[] = "receipt";
+
+struct MainGroupsRecord {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t size;
+    uint32_t generation;
+    uint32_t mainId;
+    uint8_t count;
+    uint8_t reserved[3];
+    LampGroup groups[MAX_GROUPS];
+    uint32_t checksum;
+};
+
+static_assert(sizeof(MainGroupsRecord) < 1200,
+              "MAIN group snapshot must remain compact for NVS");
+
+enum class GroupSlotState : uint8_t { MISSING, VALID, CORRUPT, UNSUPPORTED, ERROR };
+
+struct GroupSlot {
+    GroupSlotState state;
+    uint32_t generation;
+    uint32_t mainId;
+};
+
+uint32_t groupRecordChecksum(const MainGroupsRecord& record) {
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&record);
+    uint32_t crc = 0xffffffffUL;
+    for (size_t index = 0; index < offsetof(MainGroupsRecord, checksum); ++index) {
+        crc ^= bytes[index];
+        for (uint8_t bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ (0xedb88320UL &
+                static_cast<uint32_t>(-static_cast<int32_t>(crc & 1U)));
+        }
+    }
+    return ~crc;
+}
+
+bool groupRecordNewer(uint32_t left, uint32_t right) {
+    const uint32_t difference = left - right;
+    return difference != 0 && difference < 0x80000000UL;
+}
+
+GroupSlot readGroupRecord(nvs_handle_t handle, const char* key,
+                          MainGroupsRecord& record) {
+    GroupSlot slot = {};
+    slot.state = GroupSlotState::MISSING;
+    size_t required = 0;
+    const esp_err_t lengthResult = nvs_get_blob(handle, key, nullptr, &required);
+    if (lengthResult == ESP_ERR_NVS_NOT_FOUND) return slot;
+    if (lengthResult != ESP_OK) {
+        slot.state = GroupSlotState::ERROR;
+        return slot;
+    }
+    if (required != sizeof(MainGroupsRecord)) {
+        slot.state = required >= sizeof(uint32_t) + sizeof(uint16_t)
+            ? GroupSlotState::UNSUPPORTED : GroupSlotState::CORRUPT;
+        return slot;
+    }
+    size_t size = sizeof(record);
+    if (nvs_get_blob(handle, key, &record, &size) != ESP_OK ||
+        size != sizeof(record)) {
+        slot.state = GroupSlotState::ERROR;
+        return slot;
+    }
+    if (record.magic != MAIN_GROUPS_MAGIC) {
+        slot.state = GroupSlotState::CORRUPT;
+        return slot;
+    }
+    if (record.version != MAIN_GROUPS_FORMAT_VERSION ||
+        record.size != sizeof(MainGroupsRecord)) {
+        slot.state = GroupSlotState::UNSUPPORTED;
+        return slot;
+    }
+    if (record.generation == 0 || record.mainId == 0 ||
+        record.count > MAX_GROUPS || record.reserved[0] != 0 ||
+        record.reserved[1] != 0 || record.reserved[2] != 0 ||
+        record.checksum != groupRecordChecksum(record)) {
+        slot.state = GroupSlotState::CORRUPT;
+        return slot;
+    }
+    GroupRegistry candidate = {};
+    candidate.mainId = record.mainId;
+    candidate.count = record.count;
+    candidate.persistenceReady = true;
+    memcpy(candidate.groups, record.groups, sizeof(candidate.groups));
+    if (!validateGroupRegistry(candidate, candidate.mainId)) {
+        slot.state = GroupSlotState::CORRUPT;
+        return slot;
+    }
+    slot.state = GroupSlotState::VALID;
+    slot.generation = record.generation;
+    slot.mainId = record.mainId;
+    return slot;
+}
+
+GroupSlot readGroupSlot(nvs_handle_t handle, const char* key) {
+    MainGroupsRecord record = {};
+    return readGroupRecord(handle, key, record);
+}
+
+bool buildGroupRecord(const GroupRegistry& registry, uint32_t generation,
+                      MainGroupsRecord& record) {
+    if (generation == 0 || registry.mainId == 0 ||
+        !validateGroupRegistry(registry, registry.mainId)) return false;
+    memset(&record, 0, sizeof(record));
+    record.magic = MAIN_GROUPS_MAGIC;
+    record.version = MAIN_GROUPS_FORMAT_VERSION;
+    record.size = static_cast<uint16_t>(sizeof(MainGroupsRecord));
+    record.generation = generation;
+    record.mainId = registry.mainId;
+    record.count = registry.count;
+    memcpy(record.groups, registry.groups, sizeof(record.groups));
+    record.checksum = groupRecordChecksum(record);
+    return true;
+}
 
 bool validRemovalReceipt(const LampRemovalReceipt& receipt) {
     return receipt.version == LAMP_REMOVAL_RECEIPT_VERSION &&
@@ -269,6 +390,122 @@ bool NvsProvisioningReservationStore::save(
     return saveReservationBlob(state);
 }
 
+GroupStoreLoadResult NvsMainGroupStore::load(
+    uint32_t expectedMainId,
+    GroupRegistry& registry
+) const {
+    if (expectedMainId == 0) return GroupStoreLoadResult::ERROR;
+    nvs_handle_t handle;
+    const esp_err_t openResult = nvs_open(
+        MAIN_GROUPS_NAMESPACE, NVS_READONLY, &handle);
+    if (openResult == ESP_ERR_NVS_NOT_FOUND) return GroupStoreLoadResult::NOT_FOUND;
+    if (openResult != ESP_OK) return GroupStoreLoadResult::ERROR;
+
+    const GroupSlot slotA = readGroupSlot(handle, MAIN_GROUPS_SLOT_A);
+    const GroupSlot slotB = readGroupSlot(handle, MAIN_GROUPS_SLOT_B);
+
+    if (slotA.state == GroupSlotState::UNSUPPORTED ||
+        slotB.state == GroupSlotState::UNSUPPORTED) {
+        nvs_close(handle);
+        return GroupStoreLoadResult::UNSUPPORTED_VERSION;
+    }
+    if (slotA.state == GroupSlotState::ERROR ||
+        slotB.state == GroupSlotState::ERROR) {
+        nvs_close(handle);
+        return GroupStoreLoadResult::ERROR;
+    }
+    if (slotA.state == GroupSlotState::MISSING &&
+        slotB.state == GroupSlotState::MISSING) {
+        nvs_close(handle);
+        return GroupStoreLoadResult::NOT_FOUND;
+    }
+
+    const bool validA = slotA.state == GroupSlotState::VALID;
+    const bool validB = slotB.state == GroupSlotState::VALID;
+    if (!validA && !validB) {
+        nvs_close(handle);
+        return GroupStoreLoadResult::CORRUPT;
+    }
+    const bool selectedIsA = validA && (!validB ||
+        !groupRecordNewer(slotB.generation, slotA.generation));
+    const char* selectedKey = selectedIsA
+        ? MAIN_GROUPS_SLOT_A : MAIN_GROUPS_SLOT_B;
+    MainGroupsRecord selected = {};
+    const GroupSlot selectedStatus = readGroupRecord(handle, selectedKey, selected);
+    nvs_close(handle);
+    if (selectedStatus.state != GroupSlotState::VALID) {
+        if (selectedStatus.state == GroupSlotState::UNSUPPORTED)
+            return GroupStoreLoadResult::UNSUPPORTED_VERSION;
+        return selectedStatus.state == GroupSlotState::ERROR
+            ? GroupStoreLoadResult::ERROR : GroupStoreLoadResult::CORRUPT;
+    }
+    if (selected.mainId != expectedMainId) return GroupStoreLoadResult::CORRUPT;
+
+    registry = {};
+    registry.mainId = selected.mainId;
+    registry.count = selected.count;
+    registry.persistenceReady = true;
+    memcpy(registry.groups, selected.groups, sizeof(registry.groups));
+    return GroupStoreLoadResult::FOUND;
+}
+
+bool NvsMainGroupStore::save(const GroupRegistry& registry) {
+    if (registry.mainId == 0 ||
+        !validateGroupRegistry(registry, registry.mainId)) return false;
+    nvs_handle_t handle;
+    if (nvs_open(MAIN_GROUPS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK)
+        return false;
+
+    const GroupSlot slotA = readGroupSlot(handle, MAIN_GROUPS_SLOT_A);
+    const GroupSlot slotB = readGroupSlot(handle, MAIN_GROUPS_SLOT_B);
+    if (slotA.state == GroupSlotState::UNSUPPORTED ||
+        slotB.state == GroupSlotState::UNSUPPORTED ||
+        slotA.state == GroupSlotState::ERROR ||
+        slotB.state == GroupSlotState::ERROR) {
+        nvs_close(handle);
+        return false;
+    }
+
+    const bool validA = slotA.state == GroupSlotState::VALID;
+    const bool validB = slotB.state == GroupSlotState::VALID;
+    if (!validA && !validB &&
+        (slotA.state == GroupSlotState::CORRUPT ||
+         slotB.state == GroupSlotState::CORRUPT)) {
+        nvs_close(handle);
+        return false;
+    }
+
+    uint32_t generation = 1;
+    const char* targetKey = MAIN_GROUPS_SLOT_A;
+    if (validA || validB) {
+        if ((validA && slotA.mainId != registry.mainId) ||
+            (validB && slotB.mainId != registry.mainId)) {
+            nvs_close(handle);
+            return false;
+        }
+        const bool newestIsA = validA && (!validB ||
+            !groupRecordNewer(slotB.generation, slotA.generation));
+        const GroupSlot& newest = newestIsA ? slotA : slotB;
+        generation = newest.generation + 1;
+        if (generation == 0) generation = 1;
+        targetKey = newestIsA ? MAIN_GROUPS_SLOT_B : MAIN_GROUPS_SLOT_A;
+    } else if (slotA.state == GroupSlotState::CORRUPT) {
+        targetKey = MAIN_GROUPS_SLOT_A;
+    } else if (slotB.state == GroupSlotState::CORRUPT) {
+        targetKey = MAIN_GROUPS_SLOT_B;
+    }
+
+    MainGroupsRecord record = {};
+    const bool built = buildGroupRecord(registry, generation, record);
+    const esp_err_t writeResult = built
+        ? nvs_set_blob(handle, targetKey, &record, sizeof(record))
+        : ESP_FAIL;
+    const esp_err_t commitResult = writeResult == ESP_OK
+        ? nvs_commit(handle) : ESP_FAIL;
+    nvs_close(handle);
+    return commitResult == ESP_OK;
+}
+
 #else
 
 bool NvsProvisioningStore::load(ProvisioningRecord& record) const {
@@ -319,6 +556,18 @@ bool NvsProvisioningReservationStore::load(
 bool NvsProvisioningReservationStore::save(
     const MainProvisioningReservationState&
 ) {
+    return false;
+}
+
+GroupStoreLoadResult NvsMainGroupStore::load(
+    uint32_t,
+    GroupRegistry& registry
+) const {
+    initGroupRegistry(registry);
+    return GroupStoreLoadResult::ERROR;
+}
+
+bool NvsMainGroupStore::save(const GroupRegistry&) {
     return false;
 }
 

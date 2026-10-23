@@ -1,4 +1,6 @@
 file(GLOB SMART_LIGHTING_SOURCES "${CMAKE_CURRENT_LIST_DIR}/*.cpp")
+# Native test fakes are selected by the PlatformIO native filter, not ESP-IDF.
+list(FILTER SMART_LIGHTING_SOURCES EXCLUDE REGEX "native_v5_runtime_test_stubs\\.cpp$")
 
 option(SMART_LIGHTING_BUILD_ZIGBEE "Build the ESP-Zigbee transport" ON)
 option(SMART_LIGHTING_BUILD_WIFI "Build the Wi-Fi station transport" OFF)

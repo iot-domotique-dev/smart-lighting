@@ -14,9 +14,12 @@ require.extensions['.ts'] = (module, filename) => {
 
 const { CoreApiError, describeApiError, getHealth, getCore, getModules, getDevices,
   getDevice, getCommand, getRemovalOperation, lampsOnly, requestDeviceRemoval,
-  submitBrightness, submitPower } = require('../src/api/coreApiClient.ts');
+  submitBrightness, submitPower, getGroups, getGroup, createGroup, renameGroup,
+  changeGroupMember, deleteGroup, getGroupOperation, setGroupPower } =
+  require('../src/api/coreApiClient.ts');
 const { acquireLampCommand, pollCommand, releaseLampCommand } =
   require('../src/features/lighting/commandPolling.ts');
+const { groupMemberResultLabel } = require('../src/features/groups/groupOperationLabels.ts');
 const originalFetch = global.fetch;
 
 afterEach(() => { global.fetch = originalFetch; });
@@ -82,6 +85,131 @@ test('une réponse d’état lampe invalide est refusée', async () => {
     last_confirmed_state: { power: 'on', status: 'unknown' } }], count: 1 });
   await assert.rejects(getDevices('192.168.1.20'),
     (error) => error instanceof CoreApiError && error.kind === 'invalid_response');
+});
+
+test('le client groupe utilise les routes MAIN, Bearer et les IDs V7', async () => {
+  const mainId = 4074601247;
+  const groupId = 901;
+  const operationId = 902;
+  const group = { id: groupId, main_id: mainId, name: 'Salon', revision: 2,
+    member_ids: [3559985816] };
+  const requests = [];
+  global.fetch = async (url, options) => {
+    requests.push({ url, options });
+    if (url.endsWith(`/modules/${mainId}/groups`) && options.method === 'GET')
+      return respond({ groups: [group], count: 1 });
+    if (url.endsWith(`/modules/${mainId}/groups/${groupId}`) && options.method === 'GET')
+      return respond({ group });
+    if (options.method === 'GET')
+      return respond({ operation: { id: operationId, state: 'persisted',
+        result: 'persisted', group_id: groupId, revision: 3 } });
+    return respond({ operation: { id: operationId, state: 'sent' } }, 202);
+  };
+
+  assert.deepEqual((await getGroups('192.168.1.20', mainId, 'test-token')).groups, [group]);
+  assert.deepEqual((await getGroup('192.168.1.20', mainId, groupId, 'test-token')).group, group);
+  assert.equal((await createGroup('192.168.1.20', mainId,
+    { operation_id: operationId, name: 'Bureau' }, 'test-token')).operation.state, 'sent');
+  await renameGroup('192.168.1.20', mainId, groupId,
+    { operation_id: operationId, expected_revision: 2, name: 'Salon 2' }, 'test-token');
+  await changeGroupMember('192.168.1.20', mainId, groupId,
+    { operation_id: operationId, expected_revision: 2,
+      member_action: 'remove', lamp_id: 3559985816 }, 'test-token');
+  await deleteGroup('192.168.1.20', mainId, groupId,
+    { operation_id: operationId, expected_revision: 2 }, 'test-token');
+  assert.equal((await getGroupOperation('192.168.1.20', operationId, 'test-token'))
+    .operation.state, 'persisted');
+
+  assert.deepEqual(requests.map(({ url, options }) => [new URL(url).pathname, options.method]), [
+    [`/api/v1/modules/${mainId}/groups`, 'GET'],
+    [`/api/v1/modules/${mainId}/groups/${groupId}`, 'GET'],
+    [`/api/v1/modules/${mainId}/groups`, 'POST'],
+    [`/api/v1/modules/${mainId}/groups/${groupId}`, 'PATCH'],
+    [`/api/v1/modules/${mainId}/groups/${groupId}`, 'PATCH'],
+    [`/api/v1/modules/${mainId}/groups/${groupId}`, 'DELETE'],
+    [`/api/v1/group-operations/${operationId}`, 'GET'],
+  ]);
+  assert.ok(requests.every(({ options }) =>
+    options.headers.Authorization === 'Bearer test-token'));
+  assert.equal(JSON.parse(requests[2].options.body).operation_id, operationId);
+  assert.equal(JSON.parse(requests[4].options.body).lamp_id, 3559985816);
+});
+
+test('une réponse HTTP perdue sur une mutation de groupe n’est jamais renvoyée automatiquement', async () => {
+  let calls = 0;
+  global.fetch = async () => { calls++; throw new Error('connection reset'); };
+  await assert.rejects(createGroup('192.168.1.20', 4074601247,
+    { operation_id: 123456, name: 'Entree' }, 'test-token'),
+  (error) => error instanceof CoreApiError && error.kind === 'submission_uncertain');
+  assert.equal(calls, 1);
+});
+
+test('ON collectif envoie une seule commande parent authentifiée et les résultats gardent chaque lampe', async () => {
+  const requests = [];
+  global.fetch = async (url, options) => {
+    requests.push({ url, options });
+    if (options.method === 'POST')
+      return respond({ operation: { id: 912345, state: 'sent' } }, 202);
+    return respond({ operation: { id: 912345, state: 'completed', result: 'partial',
+      group_id: 9001, members: [
+        { lamp_id: 3559985816, child_id: 5001, state: 'executed', result: 'executed' },
+        { lamp_id: 3559985817, child_id: 5002, state: 'offline', result: 'offline' },
+      ] } });
+  };
+  const submitted = await setGroupPower('192.168.1.20', 4074601247, 9001,
+    { operation_id: 912345, power: 'on' }, 'group-test-token');
+  const status = await getGroupOperation('192.168.1.20', 912345, 'group-test-token');
+  assert.equal(submitted.operation.state, 'sent');
+  assert.equal(status.operation.result, 'partial');
+  assert.deepEqual(status.operation.members.map((member) => member.state),
+    ['executed', 'offline']);
+  assert.equal(requests.length, 2);
+  assert.equal(new URL(requests[0].url).pathname,
+    '/api/v1/modules/4074601247/groups/9001/commands/power');
+  assert.equal(requests[0].options.method, 'POST');
+  assert.deepEqual(JSON.parse(requests[0].options.body),
+    { operation_id: 912345, power: 'on' });
+  assert.equal(new URL(requests[1].url).pathname,
+    '/api/v1/group-operations/912345');
+  assert.ok(requests.every(({ options }) =>
+    options.headers.Authorization === 'Bearer group-test-token'));
+});
+
+test('réponse POST collective perdue est incertaine et le client ne répète jamais le POST', async () => {
+  let calls = 0;
+  global.fetch = async () => { calls++; throw new Error('connection reset'); };
+  await assert.rejects(setGroupPower('192.168.1.20', 4074601247, 9001,
+    { operation_id: 912346, power: 'off' }, 'group-test-token'),
+  (error) => error instanceof CoreApiError && error.kind === 'submission_uncertain');
+  assert.equal(calls, 1);
+});
+
+test('réponse collective refuse les doublons de lampe ou d’identifiant enfant', async () => {
+  for (const members of [
+    [
+      { lamp_id: 11, child_id: 50, state: 'executed', result: 'executed' },
+      { lamp_id: 11, child_id: 51, state: 'offline', result: 'offline' },
+    ],
+    [
+      { lamp_id: 11, child_id: 50, state: 'executed', result: 'executed' },
+      { lamp_id: 12, child_id: 50, state: 'uncertain', result: 'superseded' },
+    ],
+  ]) {
+    global.fetch = async () => respond({ operation: { id: 912347,
+      state: 'completed', result: 'partial', members } });
+    await assert.rejects(getGroupOperation('192.168.1.20', 912347, 'group-test-token'),
+      (error) => error instanceof CoreApiError && error.kind === 'invalid_response');
+  }
+});
+
+test('l’écran traduit les résultats par lampe et signale OFF prioritaire', () => {
+  assert.equal(groupMemberResultLabel({ lamp_id: 11, child_id: 50,
+    state: 'executed', result: 'executed' }), 'exécutée et confirmée');
+  assert.equal(groupMemberResultLabel({ lamp_id: 12, child_id: 51,
+    state: 'offline', result: 'offline' }), 'hors ligne');
+  assert.equal(groupMemberResultLabel({ lamp_id: 13, child_id: 52,
+    state: 'uncertain', result: 'superseded' }),
+  'résultat incertain · remplacée par OFF prioritaire');
 });
 
 test('le client accepte les états brightness unknown et les réponses V7.8 sans champs brightness', async () => {

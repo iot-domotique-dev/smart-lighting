@@ -201,12 +201,12 @@ void test_lamp_group_scene_registry_capacities() {
     for (uint32_t i = 0; i < MAX_GROUPS; i++) {
         LampGroup group = {};
         group.id = i + 1;
-        group.name = "group";
+        TEST_ASSERT_TRUE(setGroupName(group, "group"));
         TEST_ASSERT_TRUE(addGroup(groups, group));
     }
     LampGroup extraGroup = {};
     extraGroup.id = MAX_GROUPS + 1;
-    extraGroup.name = "extra";
+    TEST_ASSERT_TRUE(setGroupName(extraGroup, "extra"));
     TEST_ASSERT_FALSE(addGroup(groups, extraGroup));
     TEST_ASSERT_EQUAL_UINT8(MAX_GROUPS, groups.count);
 

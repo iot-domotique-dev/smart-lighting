@@ -6,6 +6,19 @@ import type {
   DeviceRecord,
   DeviceResponse,
   DevicesResponse,
+  GroupMemberRequest,
+  GroupMemberOperationResult,
+  GroupMemberOperationState,
+  GroupOperation,
+  GroupOperationResponse,
+  GroupOperationState,
+  GroupRecord,
+  GroupsResponse,
+  GroupResponse,
+  SetGroupPowerRequest,
+  CreateGroupRequest,
+  RenameGroupRequest,
+  DeleteGroupRequest,
   HealthResponse,
   LampRecord,
   ModulesResponse,
@@ -88,18 +101,19 @@ function isDevice(value: unknown): value is DeviceRecord {
 }
 
 interface RequestOptions {
-  method?: 'GET' | 'POST' | 'DELETE';
+  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   token?: string;
   body?: string;
   signal?: AbortSignal;
   acceptStatuses?: readonly number[];
+  timeoutMs?: number;
 }
 
 async function requestJson(ip: string, path: string, options: RequestOptions = {})
   : Promise<{ body: unknown; status: number }> {
   const method = options.method ?? 'GET';
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? REQUEST_TIMEOUT_MS);
   const abortRequest = () => controller.abort();
   if (options.signal?.aborted) controller.abort();
   else options.signal?.addEventListener('abort', abortRequest, { once: true });
@@ -112,7 +126,7 @@ async function requestJson(ip: string, path: string, options: RequestOptions = {
           Accept: 'application/json',
           'Cache-Control': 'no-store',
           ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
-          ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
+          ...(method !== 'GET' ? { 'Content-Type': 'application/json' } : {}),
         },
         ...(options.body ? { body: options.body } : {}),
         signal: controller.signal,
@@ -315,6 +329,157 @@ export async function getRemovalOperation(ip: string, operationId: V7Id,
   return body as unknown as RemovalOperationResponse;
 }
 
+const GROUP_OPERATION_STATES: readonly GroupOperationState[] = [
+  'sent', 'accepted', 'persisted', 'completed', 'failed', 'uncertain',
+];
+
+const GROUP_MEMBER_OPERATION_STATES: readonly GroupMemberOperationState[] = [
+  'in_progress', 'executed', 'failed', 'offline', 'unsupported', 'uncertain',
+];
+
+function isGroupMemberOperation(value: unknown): value is GroupMemberOperationResult {
+  return isRecord(value) && isV7Id(value.lamp_id) && isV7Id(value.child_id) &&
+    GROUP_MEMBER_OPERATION_STATES.includes(value.state as GroupMemberOperationState) &&
+    typeof value.result === 'string';
+}
+
+function isGroupRecord(value: unknown, expectedMainId?: V7Id): value is GroupRecord {
+  return isRecord(value) && isV7Id(value.id) && isV7Id(value.main_id) &&
+    (expectedMainId === undefined || value.main_id === expectedMainId) &&
+    typeof value.name === 'string' && value.name.length >= 1 && value.name.length <= 31 &&
+    Number.isInteger(value.revision) && Number(value.revision) > 0 &&
+    Number(value.revision) <= 0xffffffff && Array.isArray(value.member_ids) &&
+    value.member_ids.length <= 10 && value.member_ids.every(isV7Id) &&
+    new Set(value.member_ids).size === value.member_ids.length;
+}
+
+function isGroupOperation(value: unknown, expectedId: V7Id): value is GroupOperation {
+  return isRecord(value) && value.id === expectedId &&
+    GROUP_OPERATION_STATES.includes(value.state as GroupOperationState) &&
+    (value.result === undefined || typeof value.result === 'string') &&
+    (value.group_id === undefined || isV7Id(value.group_id)) &&
+    (value.revision === undefined || (Number.isInteger(value.revision) &&
+      Number(value.revision) >= 0 && Number(value.revision) <= 0xffffffff)) &&
+    (value.members === undefined || (Array.isArray(value.members) &&
+      value.members.length <= 10 && value.members.every(isGroupMemberOperation) &&
+      new Set(value.members.map((member) => member.lamp_id)).size === value.members.length &&
+      new Set(value.members.map((member) => member.child_id)).size === value.members.length));
+}
+
+export function isValidGroupName(name: string): boolean {
+  return name.length >= 1 && name.length <= 31 && /^[\x20-\x7e]+$/.test(name) &&
+    !/["\\]/.test(name);
+}
+
+export async function getGroups(ip: string, mainId: V7Id, token: string,
+  signal?: AbortSignal): Promise<GroupsResponse> {
+  if (!isV7Id(mainId)) return invalidResponse();
+  const body = (await requestJson(ip, `/modules/${mainId}/groups`, {
+    token, signal, timeoutMs: 12000,
+  })).body;
+  if (!isRecord(body) || !Array.isArray(body.groups) ||
+      !body.groups.every((group) => isGroupRecord(group, mainId)) ||
+      body.groups.length > 10 || body.count !== body.groups.length) return invalidResponse();
+  return body as unknown as GroupsResponse;
+}
+
+export async function getGroup(ip: string, mainId: V7Id, groupId: V7Id, token: string,
+  signal?: AbortSignal): Promise<GroupResponse> {
+  if (!isV7Id(mainId) || !isV7Id(groupId)) return invalidResponse();
+  const body = (await requestJson(ip, `/modules/${mainId}/groups/${groupId}`, {
+    token, signal, timeoutMs: 12000,
+  })).body;
+  if (!isRecord(body) || !isGroupRecord(body.group, mainId) || body.group.id !== groupId)
+    return invalidResponse();
+  return body as unknown as GroupResponse;
+}
+
+function validateGroupOperationSubmission(body: unknown, status: number,
+  operationId: V7Id): GroupOperationResponse {
+  const operation = isRecord(body) ? body.operation : undefined;
+  if ((status !== 202 && status !== 200) || !isGroupOperation(operation, operationId)) {
+    throw new CoreApiError('submission_uncertain',
+      'Réponse de groupe inattendue : consultez le même identifiant avant toute nouvelle demande.');
+  }
+  return body as GroupOperationResponse;
+}
+
+export async function createGroup(ip: string, mainId: V7Id, request: CreateGroupRequest,
+  token: string, signal?: AbortSignal): Promise<GroupOperationResponse> {
+  if (!isV7Id(mainId) || !isV7Id(request.operation_id) || !isValidGroupName(request.name))
+    return invalidResponse();
+  const response = await requestJson(ip, `/modules/${mainId}/groups`, {
+    method: 'POST', token, body: JSON.stringify(request), signal, acceptStatuses: [200, 202],
+  });
+  return validateGroupOperationSubmission(response.body, response.status, request.operation_id);
+}
+
+export async function renameGroup(ip: string, mainId: V7Id, groupId: V7Id,
+  request: RenameGroupRequest, token: string, signal?: AbortSignal)
+  : Promise<GroupOperationResponse> {
+  if (!isV7Id(mainId) || !isV7Id(groupId) || !isV7Id(request.operation_id) ||
+      !Number.isInteger(request.expected_revision) || request.expected_revision <= 0 ||
+      !isValidGroupName(request.name)) return invalidResponse();
+  const response = await requestJson(ip, `/modules/${mainId}/groups/${groupId}`, {
+    method: 'PATCH', token, body: JSON.stringify(request), signal,
+    acceptStatuses: [200, 202],
+  });
+  return validateGroupOperationSubmission(response.body, response.status, request.operation_id);
+}
+
+export async function changeGroupMember(ip: string, mainId: V7Id, groupId: V7Id,
+  request: GroupMemberRequest, token: string, signal?: AbortSignal)
+  : Promise<GroupOperationResponse> {
+  if (!isV7Id(mainId) || !isV7Id(groupId) || !isV7Id(request.operation_id) ||
+      !isV7Id(request.lamp_id) || !Number.isInteger(request.expected_revision) ||
+      request.expected_revision <= 0 ||
+      (request.member_action !== 'add' && request.member_action !== 'remove'))
+    return invalidResponse();
+  const response = await requestJson(ip, `/modules/${mainId}/groups/${groupId}`, {
+    method: 'PATCH', token, body: JSON.stringify(request), signal,
+    acceptStatuses: [200, 202],
+  });
+  return validateGroupOperationSubmission(response.body, response.status, request.operation_id);
+}
+
+export async function setGroupPower(ip: string, mainId: V7Id, groupId: V7Id,
+  request: SetGroupPowerRequest, token: string, signal?: AbortSignal)
+  : Promise<GroupOperationResponse> {
+  if (!isV7Id(mainId) || !isV7Id(groupId) || !isV7Id(request.operation_id) ||
+      (request.power !== 'on' && request.power !== 'off')) return invalidResponse();
+  const response = await requestJson(ip,
+    `/modules/${mainId}/groups/${groupId}/commands/power`, {
+      method: 'POST', token, body: JSON.stringify(request), signal,
+      acceptStatuses: [200, 202],
+    });
+  return validateGroupOperationSubmission(response.body, response.status,
+    request.operation_id);
+}
+
+export async function deleteGroup(ip: string, mainId: V7Id, groupId: V7Id,
+  request: DeleteGroupRequest, token: string, signal?: AbortSignal)
+  : Promise<GroupOperationResponse> {
+  if (!isV7Id(mainId) || !isV7Id(groupId) || !isV7Id(request.operation_id) ||
+      !Number.isInteger(request.expected_revision) || request.expected_revision <= 0)
+    return invalidResponse();
+  const response = await requestJson(ip, `/modules/${mainId}/groups/${groupId}`, {
+    method: 'DELETE', token, body: JSON.stringify(request), signal,
+    acceptStatuses: [200, 202],
+  });
+  return validateGroupOperationSubmission(response.body, response.status, request.operation_id);
+}
+
+export async function getGroupOperation(ip: string, operationId: V7Id, token: string,
+  signal?: AbortSignal): Promise<GroupOperationResponse> {
+  if (!isV7Id(operationId)) return invalidResponse();
+  const body = (await requestJson(ip, `/group-operations/${operationId}`, {
+    token, signal,
+  })).body;
+  if (!isRecord(body) || !isGroupOperation(body.operation, operationId))
+    return invalidResponse();
+  return body as unknown as GroupOperationResponse;
+}
+
 export function isValidPairingHardwareId(value: string): boolean {
   return /^C6-[0-9A-Fa-f]{16}$/.test(value);
 }
@@ -468,6 +633,17 @@ export function describeApiError(error: unknown): string {
       case 'unsupported_topology': return 'Le retrait mobile ne prend en charge qu’un seul MAIN.';
       case 'removal_transport_uncertain':
       case 'removal_query_uncertain': return 'La demande de retrait est incertaine. Reprenez le suivi avec le même identifiant.';
+      case 'unknown_main': return 'Le MAIN demandé n’est pas connu du CORE.';
+      case 'groups_unsupported': return 'Ce MAIN n’annonce pas la configuration des groupes.';
+      case 'group_not_found': return 'Ce groupe n’existe plus. Actualisez la liste.';
+      case 'unknown_lamp': return 'Cette lampe n’est pas associée à ce MAIN.';
+      case 'invalid_group_name': return 'Le nom du groupe est invalide ou trop long.';
+      case 'revision_conflict': return 'Le groupe a changé ailleurs. Rechargez-le avant de modifier.';
+      case 'group_storage_unavailable': return 'MAIN ne peut pas lire ou écrire sa configuration NVS.';
+      case 'group_operation_in_progress': return 'Une autre modification de groupe est en cours.';
+      case 'group_operation_not_found': return 'Le suivi de cette opération a expiré ou a été évincé.';
+      case 'group_result_uncertain': return 'Le résultat est incertain. Relisez les groupes avant toute nouvelle modification.';
+      case 'group_transport_uncertain': return 'Le résultat MAIN est incertain. Consultez le même identifiant avant de réessayer.';
       default: break;
     }
     return `Erreur HTTP ${error.status ?? '?'}${error.code ? ` (${error.code})` : ''}.`;

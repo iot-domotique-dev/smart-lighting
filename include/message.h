@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 
+#include "group_protocol.h"
+
 
 enum class MessageType {
 
@@ -23,7 +25,8 @@ enum class MessageType {
     UNPAIR_REQUEST,
     UNPAIR_CONFIRM,
     UNPAIR_COMMIT,
-    UNPAIR_REJECT
+    UNPAIR_REJECT,
+    GROUP_CONTROL
 };
 
 
@@ -82,4 +85,5 @@ struct Message {
     uint32_t provisioningDeviceId;
     uint8_t deviceRole;
     uint8_t pairingState;
+    GroupProtocolPayload group;
 };

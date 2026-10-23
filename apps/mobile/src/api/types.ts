@@ -170,6 +170,77 @@ export interface RemovalOperationSubmissionResponse {
   operation: RemovalOperation;
 }
 
+export interface GroupRecord {
+  id: V7Id;
+  main_id: V7Id;
+  name: string;
+  revision: number;
+  member_ids: V7Id[];
+}
+
+export interface GroupsResponse {
+  groups: GroupRecord[];
+  count: number;
+}
+
+export interface GroupResponse {
+  group: GroupRecord;
+}
+
+export type GroupOperationState = 'sent' | 'accepted' | 'persisted' |
+  'completed' | 'failed' | 'uncertain';
+
+export interface GroupOperation {
+  id: V7Id;
+  state: GroupOperationState;
+  result?: string;
+  group_id?: V7Id;
+  revision?: number;
+  members?: GroupMemberOperationResult[];
+}
+
+export type GroupMemberOperationState = 'in_progress' | 'executed' | 'failed' |
+  'offline' | 'unsupported' | 'uncertain';
+
+export interface GroupMemberOperationResult {
+  lamp_id: V7Id;
+  child_id: V7Id;
+  state: GroupMemberOperationState;
+  result: string;
+}
+
+export interface SetGroupPowerRequest {
+  operation_id: V7Id;
+  power: PowerState;
+}
+
+export interface GroupOperationResponse {
+  operation: GroupOperation;
+}
+
+export interface CreateGroupRequest {
+  operation_id: V7Id;
+  name: string;
+}
+
+export interface RenameGroupRequest {
+  operation_id: V7Id;
+  expected_revision: number;
+  name: string;
+}
+
+export interface GroupMemberRequest {
+  operation_id: V7Id;
+  expected_revision: number;
+  member_action: 'add' | 'remove';
+  lamp_id: V7Id;
+}
+
+export interface DeleteGroupRequest {
+  operation_id: V7Id;
+  expected_revision: number;
+}
+
 export interface ApiErrorResponse {
   error: { code: string; message: string };
 }

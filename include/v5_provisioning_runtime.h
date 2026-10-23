@@ -6,6 +6,46 @@
 #include "message_deduplicator.h"
 #include "provisioning.h"
 #include "core_pairing_protocol.h"
+#include "group_manager.h"
+
+constexpr uint8_t MAIN_GROUP_POWER_OPERATION_SLOTS = 32;
+
+struct MainGroupPowerMember {
+    uint32_t localId;
+    uint32_t destinationId;
+    uint32_t childCommandId;
+    uint32_t sentAt;
+    uint32_t firstSentAt;
+    GroupProtocolResult result;
+    uint8_t retries;
+    bool waiting;
+    bool supersededByPriorityOff;
+};
+
+struct MainGroupPowerOperation {
+    uint32_t id;
+    uint32_t startedAt;
+    uint32_t completedAt;
+    GroupProtocolPayload request;
+    MainGroupPowerMember members[MAX_GROUP_LAMPS];
+    uint8_t memberCount;
+    GroupProtocolResult result;
+    bool valid;
+    bool active;
+};
+
+struct MainIndividualOutputGuard {
+    uint32_t messageId;
+    uint32_t localId;
+    uint32_t destinationId;
+    uint32_t startedAt;
+    uint32_t fencesMessageId;
+    int32_t commandType;
+    int32_t value;
+    bool active;
+    bool uncertain;
+    bool supersededByPriorityOff;
+};
 
 class V5ProvisioningRuntime {
 private:
@@ -16,6 +56,8 @@ private:
     DeviceRole role;
     ProvisioningStore* lampStore;
     ProvisioningReservationStore* reservationStore;
+    GroupStore* groupStore;
+    GroupRegistry* groupRegistry;
     ProvisioningLamp* lampPairing;
     MainProvisioning* mainPairing;
     char hardwareId[LAMP_HARDWARE_ID_LENGTH];
@@ -33,6 +75,17 @@ private:
     uint32_t nextRemovalRetryAt;
     uint32_t lastRemovalContactAt;
     char activePairingHardwareId[LAMP_HARDWARE_ID_LENGTH];
+    GroupRegistry groupReadSnapshot;
+    GroupProtocolPayload activeGroupRequest;
+    uint8_t groupReadIndex;
+    uint8_t groupReadMemberOffset;
+    uint8_t groupReadPhase;
+    bool groupReadActive;
+    bool groupReadIsList;
+    MainGroupPowerOperation groupPowerOperations[
+        MAIN_GROUP_POWER_OPERATION_SLOTS];
+    MainIndividualOutputGuard individualOutputGuards[MAX_PENDING_MESSAGES];
+    uint8_t nextGroupPowerOperationSlot;
 
     static bool handleMessage(
         Communication& communication,
@@ -49,6 +102,18 @@ private:
                                    const char* hardwareId);
     void clearPairingOperation();
     bool handleCoreRemovalControl(const Message& message);
+    bool handleCoreGroupControl(const Message& message);
+    bool handleGroupPowerRequest(const Message& message);
+    bool handleGroupPowerAck(const Message& message);
+    bool handleGroupOutputCommand(const Message& message);
+    void pollGroupPowerOperations(uint32_t now);
+    void sendGroupPowerMemberResult(MainGroupPowerOperation& operation,
+                                    uint8_t memberIndex);
+    void finishGroupPowerIfReady(MainGroupPowerOperation& operation,
+                                 uint32_t now);
+    bool hasActiveGroupPowerOperation() const;
+    void pollGroupRead();
+    bool sendGroupResponse(const GroupProtocolPayload& group);
     void sendRemovalResult(uint32_t operationId,
                            CorePairingResultCode result,
                            const MainProvisioningReservationState& state);
@@ -69,7 +134,9 @@ public:
     bool begin(
         DeviceRole role,
         ProvisioningStore* lampStore = nullptr,
-        ProvisioningReservationStore* reservationStore = nullptr
+        ProvisioningReservationStore* reservationStore = nullptr,
+        GroupStore* groupStore = nullptr,
+        GroupRegistry* groupRegistry = nullptr
     );
     void poll();
 

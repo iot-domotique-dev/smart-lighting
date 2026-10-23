@@ -129,6 +129,14 @@ Les scénarios de découverte nécessitent une lampe réellement non appairée. 
 
 L’utilisateur a confirmé la réussite de l’ajout d’une lampe depuis l’application sur son téléphone, avec un seul MAIN et une LAMP_C6. Le compte rendu ne précise pas l’OS du téléphone et ne contient ni ID d’opération, ni ID local, ni capture ou journal série. Cette validation couvre le parcours nominal d’ajout sur ce montage; elle ne valide pas le nouveau parcours de retrait V7.7.3, le multi-MAIN ou plusieurs lampes physiques.
 
+## Configurer les groupes — V7.10.3
+
+Le bouton **Groupes** apparaît depuis l’inventaire quand un seul MAIN est en ligne et annonce la capacité `groups`. L’écran permet de lire, créer, renommer, supprimer et gérer les membres d’un groupe. Les groupes et leurs membres restent stockés sur MAIN; l’application n’envoie aucune commande collective.
+
+Les routes ajoutées au client sont `GET/POST /api/v1/modules/{main_id}/groups`, `GET/PATCH/DELETE /api/v1/modules/{main_id}/groups/{group_id}` et `GET /api/v1/group-operations/{operation_id}`. Le client adresse les lampes par ID V7. Les mutations portent un `operation_id` unique et un `expected_revision`; seule la confirmation `persisted` permet d’afficher la mutation comme enregistrée. Si la réponse POST ou le suivi est perdu, l’application ne renvoie jamais automatiquement la mutation; elle relit le même ID ou bloque les prochaines modifications tant que le résultat reste incertain.
+
+Les tests simulés n’attestent pas les écritures NVS sur une carte. La capacité reste limitée à 10 groupes et 10 membres par groupe, avec un seul MAIN dans cette version. Le suivi du CORE est en mémoire; une opération inconnue ou évincée demande de vérifier l’état avant une nouvelle action. La configuration des groupes V7.10.3.1 a été validée sur matériel en 13/13 essais; le contrôle collectif V7.10.4 reste à tester sur cartes. Le contrat et les limites sont détaillés dans [le dossier V7.10.3](../../docs/V7_10_3_GROUPS_ANDROID.md).
+
 ## Structure
 
 - `App.tsx` : écran unique, configuration ou inventaire.
@@ -136,6 +144,7 @@ L’utilisateur a confirmé la réussite de l’ajout d’une lampe depuis l’a
 - `src/settings/` et `src/security/` : adresse et jeton conservés via SecureStore.
 - `src/features/core/` : configuration et test du CORE.
 - `src/features/lighting/` : liste, détail, commandes d’éclairage, retrait et suivis réconciliables.
+- `src/features/groups/` : gestion des groupes du MAIN et suivi des mutations persistantes.
 - `src/features/pairing/` : parcours d’ajout, suivi prudent des sessions et opérations.
 - `src/components/` : indicateur visuel partagé.
 - `test/` : tests du client API, du workflow pairing et du workflow de retrait avec réponses simulées.
@@ -161,8 +170,18 @@ Pour V7.7.3, `npm run lint`, `npm run typecheck`, les **56/56 tests simulés** e
 
 Pour le candidat V7.8.0, les résultats consignés sont : `npm run test:api` (**69/69**), `npm run typecheck`, `npm run lint`, `npx expo install --check` et `npx expo export --platform android` réussis. Le contrôle Expo a utilisé la table locale faute de réseau; la dépendance déclarée reste `~57.0.28`, donc l’écart déjà relevé avec `~57.0.29` n’a pas été tranché avec le registre en ligne. Node 20.19.4 a affiché `EBADENGINE`; le projet demande Node 22.13 ou plus récent. Le prébuild Android a échoué dans l’environnement de travail lors de la création du cache d’icônes; aucun SDK Android local n’était installé, donc aucun APK Gradle natif n’a été compilé. Ces vérifications logicielles ne remplacent pas l’essai matériel.
 
+Pour V7.10.3, `npm run test:api` (**75/75**), `npm run typecheck`, `npm run lint` et `npx expo export --platform android` réussissent. L’export confirme le bundle Android, pas la génération d’un APK natif ni un essai sur téléphone. Le compte rendu de cette étape ne déclare aucune validation matérielle des groupes.
+
 ### Validation matérielle rapportée — 16 octobre 2026
 
 L’utilisateur confirme le pilotage de la luminosité depuis Android jusqu’à la LED physique de test sur GPIO18. Le trajet a utilisé l’API HTTP locale, UART, Zigbee et le profil unique `lamp_c6` avec LEDC. Le montage est une LED basse tension avec résistance série de 220 Ω; cette sortie ne convient pas à une lampe secteur ou à une charge de puissance. L’essai couvre un MAIN et une LAMP.
 
 La validation V7.7 antérieure, le 15 octobre, couvre l’ajout/appairage, ON/OFF, le retrait depuis l’application, le réappairage et la persistance. Ces parcours n’ont pas été répétés pendant l’essai PWM V7.8.0. Plusieurs lampes pilotées simultanément, les scénarios de panne/récupération et la persistance de la luminosité après redémarrage à froid de LAMP ne sont pas validés. La luminosité reste en RAM et n’est pas persistée en NVS.
+
+## Commander un groupe — V7.10.4
+
+Dans **Groupes**, les boutons ON et OFF envoient chacun une seule requête `POST /api/v1/modules/{main_id}/groups/{group_id}/commands/power` avec `operation_id` et `power` (`on` ou `off`). L'application consulte ensuite `GET /api/v1/group-operations/{operation_id}` pour afficher l'état global et le résultat de chaque lampe. Elle ne crée pas une requête HTTP par lampe et ne renvoie jamais automatiquement le POST après une perte de réponse.
+
+L'identifiant d'opération et la demande en attente sont enregistrés dans SecureStore avant le POST; à la reprise, l'application ne fait que des GET. Un état `uncertain` reste à vérifier avant toute autre action. Si le CORE a redémarré et ne connaît plus l'opération, le GET indique que le suivi est absent; cela ne prouve pas que les lampes n'ont rien exécuté.
+
+La V7.10.3.1 de configuration de groupe a été validée matériellement en 13/13 essais. La commande collective V7.10.4, ses résultats partiels et ses reprises ne sont pas encore validés sur cartes.

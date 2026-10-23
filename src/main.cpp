@@ -240,10 +240,15 @@ void setup() {
 #if !defined(SMART_LIGHTING_CORE_ZIGBEE)
     static NvsProvisioningStore lampProvisioningStore;
     static NvsProvisioningReservationStore mainProvisioningReservationStore;
+    static NvsMainGroupStore mainGroupStore;
     if (DEVICE_ROLE == DeviceRole::LAMP) {
         (void)v5ProvisioningRuntime.begin(
             DEVICE_ROLE, &lampProvisioningStore,
             &mainProvisioningReservationStore);
+    } else if (DEVICE_ROLE == DeviceRole::MAIN) {
+        (void)v5ProvisioningRuntime.begin(
+            DEVICE_ROLE, nullptr, &mainProvisioningReservationStore,
+            &mainGroupStore, &groupRegistry);
     } else {
         (void)v5ProvisioningRuntime.begin(
             DEVICE_ROLE, nullptr, &mainProvisioningReservationStore);

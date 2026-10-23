@@ -4,6 +4,9 @@
 #include "device_registry.h"
 #include "provisioning_store.h"
 
+struct GroupRegistry;
+class GroupStore;
+
 enum class ProvisioningPacketType : uint8_t {
     DEVICE_ANNOUNCE,
     PAIR_REQUEST,
@@ -94,6 +97,8 @@ private:
     uint32_t mainId;
     LampRegistry& registry;
     ProvisioningReservationStore* reservationStore;
+    GroupRegistry* groupRegistry;
+    GroupStore* groupStore;
     MainProvisioningReservationState reservationState;
     bool reservationStoreReady;
     ProvisioningPacket discovered[MAX_DISCOVERED_LAMPS];
@@ -118,7 +123,9 @@ public:
     MainProvisioning(
         uint32_t mainId,
         LampRegistry& registry,
-        ProvisioningReservationStore* reservationStore = nullptr
+        ProvisioningReservationStore* reservationStore = nullptr,
+        GroupRegistry* groupRegistry = nullptr,
+        GroupStore* groupStore = nullptr
     );
 
     void startCommissioning();

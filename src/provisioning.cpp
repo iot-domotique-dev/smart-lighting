@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include "provisioning.h"
+#include "group_manager.h"
 #include "core_module_service.h"
 
 static void copyText(char* destination, size_t capacity, const char* source) {
@@ -433,11 +434,15 @@ void ProvisioningLamp::expirePendingRequest(uint32_t now) {
 MainProvisioning::MainProvisioning(
     uint32_t mainIdValue,
     LampRegistry& registryValue,
-    ProvisioningReservationStore* reservationStoreValue
+    ProvisioningReservationStore* reservationStoreValue,
+    GroupRegistry* groupRegistryValue,
+    GroupStore* groupStoreValue
 )
     : mainId(mainIdValue),
       registry(registryValue),
       reservationStore(reservationStoreValue),
+      groupRegistry(groupRegistryValue),
+      groupStore(groupStoreValue),
       reservationStoreReady(false),
       discoveredCount(0),
       commissioningEnabled(false),
@@ -1011,6 +1016,14 @@ bool MainProvisioning::reconcileRemovalPacket(
     --next.count;
     memset(&next.identities[next.count], 0, sizeof(next.identities[next.count]));
     next.removalState = MAIN_REMOVAL_SUCCEEDED;
+    // Persist group cleanup before committing the irreversible pairing removal.
+    // If group storage fails, leave the pairing reservation and live lamp intact;
+    // retrying the same removal evidence is safe and idempotent.
+    if (groupRegistry != nullptr && groupStore != nullptr &&
+        !removeLampFromAllGroupsPersisted(
+            *groupRegistry, *groupStore, reservationState.removalDeviceId)) {
+        return false;
+    }
     if (!saveReservationState(next)) return false;
 
     (void)removeLamp(registry, reservationState.removalDeviceId);

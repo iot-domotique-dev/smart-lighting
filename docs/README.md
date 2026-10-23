@@ -8,6 +8,10 @@
 
 **V7.9.5 — OFF prioritaire et retrait sûr pendant un fade :** 157/157 tests natifs passent; les 72 tests mobiles simulés, TypeScript, lint, l’export Android Expo 57 et les quatre builds firmware passent aussi. OFF interrompt un fade actif; le retrait force la sortie à LOW avant le reçu persistant. L’ordre réel reste incertain quand les commandes se chevauchent. Les cas V7.9.5 n’ont pas encore été validés sur matériel; la transaction `UNPAIR_REQUEST` pendant un fade n’est pas exercée par les tests natifs. Voir [le dossier V7.9.5](V7_9_5_OFF_PRIORITY.md).
 
+**V7.10.2 — groupes locaux persistants :** les 174 tests natifs passent et les quatre profils affectés compilent intégralement. Les groupes résident sur MAIN dans un espace NVS versionné et séparé des réservations de pairing. Cette étape n’ajoute pas d’API, d’écran Android ou de commande collective. Les écritures NVS réelles et le comportement matériel restent à valider. Voir [le dossier V7.10.2](V7_10_2_GROUPS.md).
+
+**V7.10.3.1 — configuration et persistance des groupes validées sur matériel en 13/13 essais conformes.** Le contrôle collectif ON/OFF a ensuite aussi été confirmé sur matériel par l’utilisateur; le nombre de lampes utilisées simultanément n’est pas connu. Les scénarios de panne et de concurrence restent à valider. Voir [V7.10.3](V7_10_3_GROUPS_ANDROID.md) et [V7.10.4](V7_10_4_GROUP_POWER.md).
+
 Le [README du dépôt](../README.md) donne l’état du projet et les commandes courantes. Les documents ci-dessous sont les références techniques actives; chaque sujet a une seule page de détail.
 
 **Bilan matériel V7.4.2 du 9 octobre 2026 :** cette version a été validée fonctionnellement sur le montage à quatre ESP32-C6, avec un CORE logique, un MAIN et une LAMP. Les ON/OFF et états HTTP confirmés, les transitions offline/reconnexion et l’expiration avec `execution_unknown` ont été observés sur matériel. À cette étape, 92 tests natifs passaient et les quatre profils C6 compilaient. V7.4.1 couvre le routage de deux lampes en simulation native; le banc matériel ne contenait qu’une lampe. V7.5.1 et V7.5.2 sont documentées, avec un premier essai nominal de commande depuis Android rapporté par l’utilisateur.
@@ -27,6 +31,8 @@ Le [README du dépôt](../README.md) donne l’état du projet et les commandes 
 
 - [V7.8.0, V7.9.2, V7.9.4 et V7.9.5 — variation, persistance, transitions et OFF prioritaire](V7_8_BRIGHTNESS.md) : API brightness, conservation NVS, fades LEDC, interruption prioritaire et retrait sûr.
 - [V7.9.5 — OFF prioritaire et retrait sécurisé pendant un fade](V7_9_5_OFF_PRIORITY.md) : résultats d’interruption, déduplication, séquencement incertain, retrait et limites de validation.
+- [V7.10.2 — Groupes persistants sur MAIN_LIGHTING](V7_10_2_GROUPS.md) : modèle, limites, révisions, sauvegarde/restauration NVS, nettoyage lors du retrait et fonctionnalités encore exclues.
+- [V7.10.3 — Configuration des groupes depuis Android](V7_10_3_GROUPS_ANDROID.md) : routes HTTP, protocole borné, UI Android, validations logicielles et limites matérielles.
 
 ## Tests
 
@@ -41,3 +47,14 @@ La validation V7.3 demeure la référence de l’API de commande locale et de se
 ## Historique
 
 Les contextes V2, l’audit pré-V7 et la conception V4 sont dans [l’archive](archive/README.md). Ils sont conservés comme historique et ne décrivent pas le firmware actuel.
+
+## V7.10.4 et V7.10.4.1 — commandes collectives et suivi
+
+- [V7.10.4 — commandes collectives ON/OFF des groupes](V7_10_4_GROUP_POWER.md) : fanout MAIN, résultats individuels, idempotence et limites matérielles.
+- V7.10.4.1 sépare les lectures GET des 16 entrées de changements CORE-WIFI, garde un contexte transitoire borné pour une lecture asynchrone et conserve la rétention/idempotence des mutations et commandes. Les neuf suites natives passent à 183/183; le handler HTTP de production est exercé dans la simulation native. CORE-WIFI compile avec 11 368 octets de marge flash et 106 308 octets de RAM statique utilisée.
+- Le 22 octobre 2026, sur un groupe avec une lampe, l’utilisateur a validé 20 GET liste et 20 GET détail, puis un POST collectif OFF confirmé. Quatorze POST OFF supplémentaires ont abouti en `completed`; le POST suivant a reçu le HTTP 409 `group_operation_history_full` attendu à la limite du journal global. Les essais multi-lampes, de panne et de concurrence ne sont pas couverts. Détails des IDs et des limites dans [le dossier V7.10.4](V7_10_4_GROUP_POWER.md).
+
+## V7.10.4.2 — fiabilisation du journal collectif
+
+- Le journal passe de 16 à 32 entrées sur CORE-WIFI et MAIN. Les résultats terminaux connus sont protégés au moins deux minutes après confirmation, puis réutilisables sous pression; les opérations incertaines gardent leur corrélation pour les ACK tardifs. Les GET liste/détail restent transitoires.
+- La suite native passe à 187/187, dont 22 tests groupes. `core_wifi_c6` et `main_light_c6` compilent; CORE-WIFI garde 11 074 octets de marge flash et MAIN 1 404 892 octets. La validation matérielle V7.10.4.2 reste à faire. Voir [le dossier V7.10.4](V7_10_4_GROUP_POWER.md).

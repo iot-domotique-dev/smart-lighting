@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "message.h"
+#include "group_protocol.h"
 
 constexpr uint8_t CORE_LINK_PROTOCOL_VERSION = 1;
 constexpr size_t CORE_LINK_MAX_NAME_LENGTH = 31;
@@ -22,7 +23,8 @@ enum class CoreLinkMessageType : uint8_t {
     ERROR = 6,
     COMMAND = 7,
     COMMAND_RESULT = 8,
-    PAIRING = 9
+    PAIRING = 9,
+    GROUPS = 10
 };
 
 enum class CoreLinkPairingAction : uint8_t {
@@ -78,6 +80,7 @@ struct CoreLinkPacket {
     uint32_t deviceId;
     char hardwareId[32];
     char pairingName[32];
+    GroupProtocolPayload group;
 };
 
 /* Encodes explicit fields into a versioned frame; never serializes the struct. */

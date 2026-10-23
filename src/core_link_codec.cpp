@@ -59,7 +59,83 @@ uint16_t crc16Ccitt(const uint8_t* data, size_t length) {
 
 bool isValidType(uint8_t value) {
     return value >= static_cast<uint8_t>(CoreLinkMessageType::HELLO) &&
-           value <= static_cast<uint8_t>(CoreLinkMessageType::PAIRING);
+           value <= static_cast<uint8_t>(CoreLinkMessageType::GROUPS);
+}
+
+bool appendGroupProtocol(const GroupProtocolPayload& group, uint8_t* output,
+                         size_t capacity, size_t& offset) {
+    if (!isValidGroupProtocolPayload(group, GROUP_UART_MEMBER_CHUNK)) return false;
+    size_t nameLength = 0;
+    while (nameLength < sizeof(group.name) && group.name[nameLength] != '\0')
+        ++nameLength;
+    const bool powerProtocol = group.version == GROUP_POWER_PROTOCOL_VERSION;
+    if (nameLength >= sizeof(group.name) ||
+        offset + 3 + (powerProtocol ? 28 : 24) + 3 +
+        (powerProtocol ? 1 : 0) + 1 + nameLength +
+        (group.action == GroupProtocolAction::MEMBER_CHUNK
+            ? static_cast<size_t>(group.memberCount) * 4 : 0) > capacity) return false;
+    output[offset++] = group.version;
+    output[offset++] = static_cast<uint8_t>(group.action);
+    output[offset++] = static_cast<uint8_t>(group.result);
+    writeU32(output, offset, group.operationId);
+    writeU32(output, offset, group.mainLocalId);
+    writeU32(output, offset, group.mainCoreId);
+    writeU32(output, offset, group.groupId);
+    writeU32(output, offset, group.expectedRevision);
+    writeU32(output, offset, group.memberLocalId);
+    if (powerProtocol) writeU32(output, offset, group.childCommandId);
+    output[offset++] = group.groupCount;
+    output[offset++] = group.memberCount;
+    output[offset++] = group.memberOffset;
+    if (powerProtocol) output[offset++] = group.power;
+    output[offset++] = static_cast<uint8_t>(nameLength);
+    if (nameLength != 0) {
+        memcpy(output + offset, group.name, nameLength);
+        offset += nameLength;
+    }
+    if (group.action == GroupProtocolAction::MEMBER_CHUNK) {
+        for (uint8_t index = 0; index < group.memberCount; ++index)
+            writeU32(output, offset, group.memberIds[index]);
+    }
+    return true;
+}
+
+bool readGroupProtocol(const uint8_t* input, size_t length, size_t& offset,
+                       GroupProtocolPayload& group) {
+    if (offset + 3 > length) return false;
+    group.version = input[offset++];
+    group.action = static_cast<GroupProtocolAction>(input[offset++]);
+    group.result = static_cast<GroupProtocolResult>(input[offset++]);
+    const bool powerProtocol = group.version == GROUP_POWER_PROTOCOL_VERSION;
+    if ((group.version != GROUP_PROTOCOL_VERSION &&
+         group.version != GROUP_POWER_PROTOCOL_VERSION) ||
+        !isValidGroupProtocolAction(group.action) ||
+        !isValidGroupProtocolResult(group.result) ||
+        !readU32(input, length, offset, group.operationId) ||
+        !readU32(input, length, offset, group.mainLocalId) ||
+        !readU32(input, length, offset, group.mainCoreId) ||
+        !readU32(input, length, offset, group.groupId) ||
+        !readU32(input, length, offset, group.expectedRevision) ||
+        !readU32(input, length, offset, group.memberLocalId) ||
+        (powerProtocol && !readU32(input, length, offset, group.childCommandId)) ||
+        offset + (powerProtocol ? 5 : 4) > length) return false;
+    group.groupCount = input[offset++];
+    group.memberCount = input[offset++];
+    group.memberOffset = input[offset++];
+    if (powerProtocol) group.power = input[offset++];
+    const size_t nameLength = input[offset++];
+    if (nameLength >= sizeof(group.name) || offset + nameLength > length ||
+        offset + nameLength + (group.action == GroupProtocolAction::MEMBER_CHUNK
+            ? static_cast<size_t>(group.memberCount) * 4 : 0) > length)
+        return false;
+    if (nameLength != 0) memcpy(group.name, input + offset, nameLength);
+    group.name[nameLength] = '\0';
+    offset += nameLength;
+    if (group.action == GroupProtocolAction::MEMBER_CHUNK) {
+        for (uint8_t index = 0; index < group.memberCount; ++index)
+            if (!readU32(input, length, offset, group.memberIds[index])) return false;
+    }
+    return isValidGroupProtocolPayload(group, GROUP_UART_MEMBER_CHUNK);
 }
 
 bool isValidPairingResult(uint8_t value) {
@@ -429,6 +505,12 @@ bool encodeCoreLinkFrame(
             }
             break;
 
+        case CoreLinkMessageType::GROUPS:
+            if (!appendGroupProtocol(packet.group, output,
+                                     outputCapacity - CORE_LINK_CRC_SIZE, offset))
+                return false;
+            break;
+
         default:
             return false;
     }
@@ -538,6 +620,11 @@ bool decodeCoreLinkFrame(
 
         case CoreLinkMessageType::PAIRING:
             validPayload = readPairingPacket(input, payloadEnd, offset, decoded);
+            break;
+
+        case CoreLinkMessageType::GROUPS:
+            validPayload = readGroupProtocol(input, payloadEnd, offset,
+                                              decoded.group);
             break;
 
         default:

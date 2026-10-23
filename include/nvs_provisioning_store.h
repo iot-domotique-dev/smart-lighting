@@ -1,6 +1,7 @@
 #pragma once
 
 #include "provisioning_store.h"
+#include "group_manager.h"
 
 /* ESP-IDF NVS implementation of the V4 lamp pairing store. */
 class NvsProvisioningStore : public ProvisioningStore {
@@ -25,4 +26,14 @@ public:
         MainProvisioningReservationState& state
     ) const override;
     bool save(const MainProvisioningReservationState& state) override;
+};
+
+/* Additive MAIN-only store for compact, versioned group snapshots. */
+class NvsMainGroupStore : public GroupStore {
+public:
+    GroupStoreLoadResult load(
+        uint32_t expectedMainId,
+        GroupRegistry& registry
+    ) const override;
+    bool save(const GroupRegistry& registry) override;
 };

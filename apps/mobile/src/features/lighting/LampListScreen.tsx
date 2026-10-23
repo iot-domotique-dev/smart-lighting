@@ -11,6 +11,7 @@ import { LampCard } from './LampCard';
 import type { LampCommandFeedback } from './commandPolling';
 import { brightnessDisplay } from './brightnessControl';
 import { PairingScreen } from '../pairing/PairingScreen';
+import { GroupsScreen } from '../groups/GroupsScreen';
 import { acquireRemovalAction, canRequestRemoval, createRemovalConfirmation,
   createRemovalOperationId, isCommandBlockingRemoval,
   isRemovalBlockingCommand, isRemovalInProgress, pollRemovalOperation,
@@ -66,6 +67,8 @@ export function LampListScreen({ ip, token, onSettings, commandFeedback, onPower
   const [detailError, setDetailError] = useState('');
   const [detailLoading, setDetailLoading] = useState(false);
   const [pairingOpen, setPairingOpen] = useState(false);
+  const [groupsOpen, setGroupsOpen] = useState(false);
+  const [groupsRefreshSignal, setGroupsRefreshSignal] = useState(0);
   const [removal, setRemoval] = useState<PendingRemovalOperation | null>(null);
   const [removalModalOpen, setRemovalModalOpen] = useState(false);
   const [removalStarting, setRemovalStarting] = useState(false);
@@ -148,6 +151,7 @@ export function LampListScreen({ ip, token, onSettings, commandFeedback, onPower
   }, [ip]);
 
   const finishRemovalSuccess = useCallback(async (operation: PendingRemovalOperation) => {
+    setGroupsRefreshSignal((value) => value + 1);
     const succeeded = { ...operation, phase: 'succeeded' as const };
     try {
       await persistRemoval(succeeded);
@@ -569,6 +573,7 @@ export function LampListScreen({ ip, token, onSettings, commandFeedback, onPower
   }
 
   const onlineModules = snapshot?.modules.filter((module) => module.online).length ?? 0;
+  const groupMain = snapshot?.modules.length === 1 ? snapshot.modules[0] : null;
   const detailMainOnline = Boolean(detail && snapshot?.modules.some((module) =>
     module.id === detail.parent_id && module.online));
   const removalCommandBlocked = Boolean(detail &&
@@ -634,6 +639,13 @@ export function LampListScreen({ ip, token, onSettings, commandFeedback, onPower
           accessibilityRole="button" accessibilityLabel="Ajouter une lampe">
           <Text style={styles.addLampText}>＋ Ajouter une lampe</Text>
         </Pressable>
+
+        {groupMain?.capabilities.includes('groups') ? <Pressable
+          onPress={() => setGroupsOpen(true)} style={styles.groupsButton}
+          accessibilityRole="button" accessibilityLabel="Configurer les groupes de lampes">
+          <Text style={styles.groupsButtonText}>Configurer les groupes</Text>
+          <Text style={styles.groupsButtonCaption}>Créer et modifier les groupes sur MAIN</Text>
+        </Pressable> : null}
 
         {removal ? <View style={styles.removalBanner}>
           <Text style={styles.removalBannerTitle}>{removalPhaseLabel(removal)} · {removal.deviceName}</Text>
@@ -744,6 +756,13 @@ export function LampListScreen({ ip, token, onSettings, commandFeedback, onPower
       </Modal>
       {pairingOpen ? <PairingScreen ip={ip} token={token}
         onClose={() => setPairingOpen(false)} onInventoryRefresh={() => void refresh(true)} /> : null}
+      {groupMain ? <Modal visible={groupsOpen} animationType="slide"
+        onRequestClose={() => setGroupsOpen(false)}>
+        <GroupsScreen ip={ip} token={token} mainId={groupMain.id}
+          mainOnline={groupMain.online} lamps={snapshot?.lamps ?? []}
+          refreshSignal={groupsRefreshSignal} active={groupsOpen}
+          onClose={() => setGroupsOpen(false)} />
+      </Modal> : null}
     </View>
   );
 }
@@ -775,6 +794,11 @@ const styles = StyleSheet.create({
   addLampButton: { minHeight: 48, alignItems: 'center', justifyContent: 'center',
     backgroundColor: '#18785d', borderRadius: 14, marginBottom: 14 },
   addLampText: { color: '#fff', fontSize: 14, fontWeight: '800' },
+  groupsButton: { minHeight: 58, justifyContent: 'center', backgroundColor: '#fff',
+    borderWidth: 1, borderColor: '#dce7df', borderRadius: 14, paddingHorizontal: 16,
+    marginBottom: 14 },
+  groupsButtonText: { color: '#18785d', fontSize: 13, fontWeight: '800' },
+  groupsButtonCaption: { color: '#849398', fontSize: 10, marginTop: 3 },
   removalBanner: { backgroundColor: '#fff4e8', borderColor: '#f0d4b6', borderWidth: 1,
     padding: 14, borderRadius: 14, marginBottom: 14 },
   removalBannerTitle: { color: '#70421d', fontSize: 13, fontWeight: '800' },

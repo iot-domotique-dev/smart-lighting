@@ -1,4 +1,4 @@
-# Tests Smart Lighting
+﻿# Tests Smart Lighting
 
 Les tests natifs s’exécutent sur le PC avec PlatformIO; ils ne nécessitent pas de carte :
 
@@ -12,6 +12,10 @@ Référence avant correction du cache de routage, exécutée le 7 octobre 2026 :
 
 À l’étape V7.4.1, la suite complète atteignait **86/86**, avec un scénario natif de routage et de suivi indépendant pour deux lampes sous le même MAIN. À V7.4.2, elle atteint **92/92**; les six scénarios supplémentaires couvrent l’état confirmé HTTP, les réannonces, le redémarrage du registre, l’indépendance par lampe, l’expiration et les ACK désordonnés. Ces résultats natifs ne constituent pas une validation de deux lampes physiques.
 
+À V7.10.2, la suite atteignait **174/174**. Le dossier `test_v710_groups` contient 14 scénarios couvrant les opérations et révisions de groupes, les noms bornés/possédés, les IDs locaux uint32, les rattachements MAIN, la persistance simulée, les erreurs de stockage et le nettoyage préalable au retrait. Le store mémoire natif simule les erreurs d’écriture/commit; il ne remplace pas l’essai du pilote NVS ESP-IDF sur carte.
+
+À V7.10.3, les neuf suites natives exécutées après compilation atteignent **177/177**. Les scénarios de codec couvrent les trames de groupe et protègent le décodage des trames historiques lorsque l’ID d’un message égale le marqueur du type de groupe. Les simulations n’attestent pas la radio Zigbee réelle, les écritures NVS réelles ni le parcours sur téléphone.
+
 ## Couverture par dossier
 
 - test_device_registry : registre et identités d’appareils.
@@ -21,8 +25,15 @@ Référence avant correction du cache de routage, exécutée le 7 octobre 2026 :
 - test_core_link : codec UART et règles d’annonces, d’attribution d’ID et d’identité V7.
 - test_core_api : réponses JSON, routes, erreurs HTTP et consultation du registre.
 - test_v7_commands : services CORE/bridge/MAIN et routeur LAMP, codecs UART/Zigbee réels, pertes de commandes et d’ACK, IDs 32 bits, retries, déduplication, saturation, offline, erreurs et expiration.
+- test_v710_groups : groupes MAIN, membres, révisions, persistance simulée, retrait/réappairage et handler HTTP CORE-WIFI testé avec faux serveur natif.
 - V7.4.2 étend test_v7_commands, test_core_api, test_core_link et test_device_registry pour l’historique logiciel `last_confirmed_state`; le détail matériel est dans [la clôture V7.4](../docs/V7_4_RELIABILITY.md).
 
 La correction du routage distingue `CommunicationRouteScope::CORE` de `CommunicationRouteScope::LOCAL_DEVICE`. La régression utilise le même `ZigbeeRouteTable` portable que le transport de production et vérifie l’apprentissage des routes CORE `1` et appareil local `1` dans les deux ordres, les annonces d’attribution topologique, une destination CORE absente, le routage connu par `hardwareId` et une table pleine. Validation fonctionnelle V7.2 confirmée sur cartes : ON avec ACK final, perte d’ACK avec une seule exécution, OFF et refus offline/inconnu rapportés fonctionnels, expiration CORE après deux retries, puis reprise confirmée après reconnexion du lien UART. Détails et limites dans [la procédure V7.2](../docs/V7_2_COMMANDS.md).
 
 Les tests natifs vérifient la logique et la sérialisation. Ils ne remplacent pas les essais radio Zigbee, UART physique, Wi-Fi ou HTTP sur carte. L’état des essais matériels est suivi dans [la documentation V5](../docs/V5_ZIGBEE.md), [le CORE double C6](../docs/V7_CORE_DOUBLE_C6.md), [l’API](../docs/V7_1_CORE_API.md), [les commandes V7.2](../docs/V7_2_COMMANDS.md) et [la clôture V7.4](../docs/V7_4_RELIABILITY.md).
+
+À V7.10.3.1, l'utilisateur a confirmé 13/13 vérifications matérielles de la configuration des groupes : reconnaissance du MAIN, opérations de gestion des groupes et membres, restauration après redémarrage MAIN et non-régression des commandes individuelles. Cette validation ne porte pas sur l'exécution collective.
+
+À V7.10.4, les neuf suites natives complètes réussissaient à **180/180**. V7.10.4.1 ajoute trois tests d'intégration à test_v710_groups, qui en compte maintenant 18 : les requêtes sont dispatchées vers le handler HTTP de production par un faux serveur ESP-IDF. Ils couvrent les lectures répétées et alternées, l'ON/OFF après ces lectures, le retry idempotent, la saturation par de véritables opérations, le timeout d'un GET et l'ignorance de sa réponse tardive. La suite native complète réussit maintenant **183/183**. Les **81/81 tests API mobiles simulés**, TypeScript et lint sont les résultats déjà rapportés pour V7.10.4; l'application mobile n'a pas changé. Le faux serveur permet de tester le handler, mais ne remplace pas le serveur HTTP ESP-IDF ou un essai sur carte.
+
+V7.10.4.2 porte `test_v710_groups` à **22 tests** et la suite native complète à **187/187**. Les nouveaux scénarios testent plus de vingt opérations terminées, la rétention minimale mesurée depuis la confirmation finale, la protection des entrées actives et incertaines, l'idempotence, l'absence de renvoi après perte de réponse HTTP, les ACK tardifs et les résultats partiels. Builds ESP-IDF complets : `core_wifi_c6` (flash utilisée 1 037 502 / 1 048 576 octets; RAM statique 102 484 / 327 680) et `main_light_c6` (flash utilisée 561 188 / 1 966 080; RAM statique 51 732 / 327 680). Aucun flash matériel n'a été effectué.

@@ -331,6 +331,48 @@ bool CoreCommandService::canBeginRemoval(uint32_t destinationId) const {
     return countPendingOutput(tracker, destinationId) <= 1;
 }
 
+void CoreCommandService::applyGroupPowerResult(uint32_t mainCoreId,
+    uint32_t lampLocalId, bool power, uint32_t operationStartedAt,
+    GroupProtocolResult result) {
+    if (mainCoreId == 0 || lampLocalId == 0) return;
+    const uint32_t destinationId = makeCoreModuleId(mainCoreId, lampLocalId);
+    Device* lamp = findDeviceById(registry, destinationId);
+    if (lamp == nullptr || lamp->role != DeviceRole::LAMP ||
+        lamp->parentId != mainCoreId || lamp->localId != lampLocalId) return;
+
+    if (result == GroupProtocolResult::UNCERTAIN) {
+        markOutputExecutionUnknown(*lamp);
+        return;
+    }
+    if (result != GroupProtocolResult::EXECUTED) return;
+
+    for (uint8_t index = 0; index < tracker.count; ++index) {
+        const PendingMessage& pending = tracker.messages[index];
+        const bool priorityOffMayOwnState = pending.priorityOff &&
+            (pending.waitingForAck || pending.timedOut ||
+             (pending.completed && pending.message.executionStatus ==
+                 ExecutionStatus::EXECUTED));
+        if (!priorityOffMayOwnState || !isTrackedOutputCommand(pending.message) ||
+            pending.message.destinationId != destinationId ||
+            static_cast<int32_t>(pending.firstSentAt - operationStartedAt) <= 0)
+            continue;
+        // A later individual OFF owns the newer confirmed state. An older
+        // group ACK can arrive after it, but must not overwrite that result.
+        return;
+    }
+
+    lamp->powerExecutionUnknown = false;
+    lamp->brightnessExecutionUnknown = false;
+
+    Message confirmed = {};
+    confirmed.destinationId = destinationId;
+    confirmed.parentMainId = mainCoreId;
+    confirmed.provisioningDeviceId = lampLocalId;
+    confirmed.commandType = static_cast<int32_t>(ActionType::SET_LAMP_POWER);
+    confirmed.value = power ? 1 : 0;
+    (void)applyConfirmedOutput(*lamp, confirmed);
+}
+
 void CoreCommandService::poll() {
     (void)updateMessageTimeouts(tracker, link);
     for (uint8_t index = 0; index < tracker.count; ++index) {

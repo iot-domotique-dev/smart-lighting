@@ -3,6 +3,7 @@
 #include <unity.h>
 
 #include "communication.h"
+#include "core_module_service.h"
 #include "provisioning.h"
 #include "zigbee_message_codec.h"
 
@@ -74,6 +75,28 @@ void test_command_round_trip_uses_stable_wire_format() {
     TEST_ASSERT_EQUAL_INT(input.value2, output.value2);
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(input.type),
                             static_cast<uint8_t>(output.type));
+}
+
+void test_legacy_id_equal_to_group_marker_stays_legacy() {
+    Message input = {};
+    input.id = static_cast<uint32_t>(MessageType::GROUP_CONTROL);
+    input.sourceId = 0xAC123456;
+    input.destinationId = 1;
+    input.type = MessageType::ACK;
+    input.status = MessageStatus::SENT;
+    input.executionStatus = ExecutionStatus::EXECUTED;
+    input.value2 = 7;
+
+    uint8_t bytes[ZIGBEE_MESSAGE_MAX_ENCODED_SIZE] = {};
+    size_t length = 0;
+    TEST_ASSERT_TRUE(encodeZigbeeMessage(input, bytes, sizeof(bytes), length));
+    Message output = {};
+    TEST_ASSERT_TRUE(decodeZigbeeMessage(bytes, length, output));
+    TEST_ASSERT_EQUAL_UINT32(input.id, output.id);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(MessageType::ACK),
+                            static_cast<uint8_t>(output.type));
+    TEST_ASSERT_EQUAL_UINT32(input.sourceId, output.sourceId);
+    TEST_ASSERT_EQUAL_UINT32(input.destinationId, output.destinationId);
 }
 
 void test_provisioning_payload_round_trip() {
@@ -198,13 +221,101 @@ void test_unpair_packets_bind_transaction_to_real_zigbee_endpoints() {
     assertProvisioningWireEnvelope(announcement, 11, 0);
 }
 
+void test_group_protocol_stream_frame_supports_eight_member_chunks() {
+    Message input = {};
+    input.type = MessageType::GROUP_CONTROL;
+    input.sourceId = 7;
+    input.destinationId = CORE_LOGICAL_ID;
+    input.parentMainId = 0x92345678;
+    input.group.version = GROUP_PROTOCOL_VERSION;
+    input.group.action = GroupProtocolAction::MEMBER_CHUNK;
+    input.group.operationId = 1101;
+    input.group.mainLocalId = 7;
+    input.group.mainCoreId = input.parentMainId;
+    input.group.groupId = 55;
+    input.group.expectedRevision = 4;
+    input.group.memberOffset = 0;
+    input.group.memberCount = GROUP_ZIGBEE_MEMBER_CHUNK;
+    for (uint8_t index = 0; index < input.group.memberCount; ++index)
+        input.group.memberIds[index] = 11 + index;
+
+    uint8_t bytes[ZIGBEE_MESSAGE_MAX_ENCODED_SIZE] = {};
+    size_t length = 0;
+    TEST_ASSERT_TRUE(encodeZigbeeMessage(input, bytes, sizeof(bytes), length));
+    TEST_ASSERT_LESS_OR_EQUAL_UINT(ZIGBEE_MESSAGE_MAX_ENCODED_SIZE, length);
+    Message output = {};
+    TEST_ASSERT_TRUE(decodeZigbeeMessage(bytes, length, output));
+    TEST_ASSERT_EQUAL_UINT32(input.group.operationId, output.id);
+    TEST_ASSERT_EQUAL_UINT32(input.group.memberIds[7], output.group.memberIds[7]);
+    TEST_ASSERT_EQUAL_UINT8(GROUP_ZIGBEE_MEMBER_CHUNK, output.group.memberCount);
+
+    input.group.memberCount = GROUP_ZIGBEE_MEMBER_CHUNK + 1;
+    TEST_ASSERT_FALSE(encodeZigbeeMessage(input, bytes, sizeof(bytes), length));
+}
+
+void test_zigbee_group_power_and_child_result_round_trip() {
+    Message input = {};
+    input.type = MessageType::GROUP_CONTROL;
+    input.sourceId = CORE_LOGICAL_ID;
+    input.destinationId = 7;
+    input.parentMainId = 0x92345678;
+    input.group.version = GROUP_POWER_PROTOCOL_VERSION;
+    input.group.action = GroupProtocolAction::SET_POWER;
+    input.group.operationId = 0xF1234567;
+    input.group.mainLocalId = 7;
+    input.group.mainCoreId = input.parentMainId;
+    input.group.groupId = 55;
+    input.group.power = 0;
+
+    uint8_t bytes[ZIGBEE_MESSAGE_MAX_ENCODED_SIZE] = {};
+    size_t length = 0;
+    TEST_ASSERT_TRUE(encodeZigbeeMessage(input, bytes, sizeof(bytes), length));
+    Message output = {};
+    TEST_ASSERT_TRUE(decodeZigbeeMessage(bytes, length, output));
+    TEST_ASSERT_EQUAL_UINT32(input.group.operationId, output.group.operationId);
+    TEST_ASSERT_EQUAL_UINT8(0, output.group.power);
+    TEST_ASSERT_EQUAL_UINT8(GROUP_POWER_PROTOCOL_VERSION, output.group.version);
+
+    input.group.action = GroupProtocolAction::QUERY_OPERATION;
+    length = 0;
+    TEST_ASSERT_TRUE(encodeZigbeeMessage(input, bytes, sizeof(bytes), length));
+    output = {};
+    TEST_ASSERT_TRUE(decodeZigbeeMessage(bytes, length, output));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(GroupProtocolAction::QUERY_OPERATION),
+                            static_cast<uint8_t>(output.group.action));
+    TEST_ASSERT_EQUAL_UINT32(input.group.operationId, output.group.operationId);
+
+    input.group.action = GroupProtocolAction::MEMBER_RESULT;
+    input.group.result = GroupProtocolResult::SUPERSEDED;
+    input.group.memberLocalId = 11;
+    input.group.childCommandId = 0x71234567;
+    input.group.groupCount = 2;
+    input.group.memberOffset = 1;
+    length = 0;
+    TEST_ASSERT_TRUE(encodeZigbeeMessage(input, bytes, sizeof(bytes), length));
+    output = {};
+    TEST_ASSERT_TRUE(decodeZigbeeMessage(bytes, length, output));
+    TEST_ASSERT_EQUAL_UINT32(input.group.childCommandId,
+                             output.group.childCommandId);
+    TEST_ASSERT_EQUAL_UINT32(input.group.memberLocalId,
+                             output.group.memberLocalId);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(GroupProtocolResult::SUPERSEDED),
+                          static_cast<int>(output.group.result));
+
+    input.group.version = GROUP_PROTOCOL_VERSION;
+    TEST_ASSERT_FALSE(encodeZigbeeMessage(input, bytes, sizeof(bytes), length));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_command_round_trip_uses_stable_wire_format);
+    RUN_TEST(test_legacy_id_equal_to_group_marker_stays_legacy);
     RUN_TEST(test_provisioning_payload_round_trip);
     RUN_TEST(test_decoder_rejects_truncated_and_unknown_version_frames);
     RUN_TEST(test_encoder_rejects_insufficient_buffer_and_invalid_type);
     RUN_TEST(test_v4_pairing_packet_mapping_survives_zigbee_wire_codec);
     RUN_TEST(test_unpair_packets_bind_transaction_to_real_zigbee_endpoints);
+    RUN_TEST(test_group_protocol_stream_frame_supports_eight_member_chunks);
+    RUN_TEST(test_zigbee_group_power_and_child_result_round_trip);
     return UNITY_END();
 }

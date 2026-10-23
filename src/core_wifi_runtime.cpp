@@ -68,6 +68,7 @@ void CoreWifiRuntime::poll() {
         }
     }
     api.pollPairing(millis());
+    api.pollGroupOperations(millis());
     pollConsole();
     if (registryMutex != nullptr &&
         xSemaphoreTake(registryMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -146,6 +147,10 @@ void CoreWifiRuntime::refreshRegistryStatus(EventBus& eventBus) {
 }
 
 void CoreWifiRuntime::handlePacket(const CoreLinkPacket& packet) {
+    if (packet.type == CoreLinkMessageType::GROUPS) {
+        api.handleGroupPacket(packet);
+        return;
+    }
     if (packet.type == CoreLinkMessageType::PAIRING) {
         api.handlePairingPacket(packet);
         return;

@@ -49,6 +49,39 @@ bool CoreZigbeeRuntime::handleZigbeeMessage(
 }
 
 bool CoreZigbeeRuntime::dispatchZigbeeMessage(const Message& message) {
+    if (message.type == MessageType::GROUP_CONTROL) {
+        const GroupProtocolPayload& group = message.group;
+        if (!isValidGroupProtocolPayload(group, GROUP_ZIGBEE_MEMBER_CHUNK) ||
+            !isGroupProtocolResponse(group.action) ||
+            group.mainLocalId != mainLocalId || group.mainCoreId != mainCoreId ||
+            message.sourceId != mainLocalId ||
+            message.destinationId != CORE_LOGICAL_ID ||
+            message.parentMainId != mainCoreId || !uartReady) return true;
+        const uint8_t chunkLimit = GROUP_UART_MEMBER_CHUNK;
+        const uint8_t packetCount = group.action == GroupProtocolAction::MEMBER_CHUNK
+            ? static_cast<uint8_t>((group.memberCount + chunkLimit - 1) / chunkLimit)
+            : 1;
+        for (uint8_t part = 0; part < packetCount; ++part) {
+            CoreLinkPacket response = {};
+            response.type = CoreLinkMessageType::GROUPS;
+            response.sequence = static_cast<uint16_t>(group.operationId + part);
+            response.group = group;
+            if (group.action == GroupProtocolAction::MEMBER_CHUNK) {
+                const uint8_t offset = static_cast<uint8_t>(part * chunkLimit);
+                response.group.memberOffset = static_cast<uint8_t>(group.memberOffset + offset);
+                const uint8_t remaining = static_cast<uint8_t>(group.memberCount - offset);
+                response.group.memberCount = remaining > chunkLimit
+                    ? chunkLimit : remaining;
+                for (uint8_t index = 0; index < response.group.memberCount; ++index)
+                    response.group.memberIds[index] = group.memberIds[offset + index];
+            }
+            if (!uart.send(response)) {
+                Serial.println("[CORE-ZIGBEE] failed to forward group response over UART");
+                break;
+            }
+        }
+        return true;
+    }
     if (message.type == MessageType::ACK &&
         commandBridge.handleFromZigbee(message)) {
         return true;
@@ -176,6 +209,25 @@ bool CoreZigbeeRuntime::dispatchZigbeeMessage(const Message& message) {
 }
 
 void CoreZigbeeRuntime::handleUartPacket(const CoreLinkPacket& packet) {
+    if (packet.type == CoreLinkMessageType::GROUPS) {
+        const GroupProtocolPayload& group = packet.group;
+        if (!isValidGroupProtocolPayload(group, GROUP_UART_MEMBER_CHUNK) ||
+            !isGroupProtocolRequest(group.action) ||
+            group.mainLocalId != mainLocalId || group.mainCoreId != mainCoreId ||
+            group.memberCount > GROUP_UART_MEMBER_CHUNK) return;
+        Message request = {};
+        request.type = MessageType::GROUP_CONTROL;
+        request.id = group.operationId;
+        request.sourceId = CORE_LOGICAL_ID;
+        request.destinationId = mainLocalId;
+        request.parentMainId = mainCoreId;
+        request.status = MessageStatus::SENT;
+        request.executionStatus = ExecutionStatus::NOT_EXECUTED;
+        request.group = group;
+        if (!sendMessage(zigbee, request))
+            Serial.println("[CORE-ZIGBEE] could not forward group request to MAIN");
+        return;
+    }
     if (packet.type == CoreLinkMessageType::PAIRING) {
         if (packet.localId == 0 || packet.localId != mainLocalId ||
             mainCoreId == 0) return;

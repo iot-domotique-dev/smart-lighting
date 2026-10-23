@@ -470,6 +470,103 @@ void test_uart_removal_messages_round_trip_and_reject_missing_identity() {
     TEST_ASSERT_EQUAL_UINT(0, encode(input, bytes, sizeof(bytes)));
 }
 
+void test_uart_group_metadata_and_bounded_member_chunks_round_trip() {
+    CoreLinkPacket input = {};
+    input.sequence = 0x1234;
+    input.type = CoreLinkMessageType::GROUPS;
+    input.group.version = GROUP_PROTOCOL_VERSION;
+    input.group.action = GroupProtocolAction::GROUP_META;
+    input.group.operationId = 1001;
+    input.group.mainLocalId = 7;
+    input.group.mainCoreId = 0x92345678;
+    input.group.groupId = 55;
+    input.group.expectedRevision = 3;
+    input.group.memberCount = MAX_GROUP_LAMPS;
+    strncpy(input.group.name, "A group name with bounded content",
+            sizeof(input.group.name) - 1);
+
+    uint8_t bytes[CORE_LINK_MAX_FRAME_SIZE] = {};
+    size_t length = encode(input, bytes, sizeof(bytes));
+    TEST_ASSERT_GREATER_THAN_UINT(0, length);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT(CORE_LINK_MAX_FRAME_SIZE, length);
+    CoreLinkPacket output = {};
+    TEST_ASSERT_TRUE(decodeCoreLinkFrame(bytes, length, output));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(GroupProtocolAction::GROUP_META),
+        static_cast<uint8_t>(output.group.action));
+    TEST_ASSERT_EQUAL_UINT8(MAX_GROUP_LAMPS, output.group.memberCount);
+    TEST_ASSERT_EQUAL_STRING(input.group.name, output.group.name);
+
+    input.group.action = GroupProtocolAction::MEMBER_CHUNK;
+    input.group.name[0] = '\0';
+    input.group.expectedRevision = 3;
+    input.group.memberOffset = 4;
+    input.group.memberCount = GROUP_UART_MEMBER_CHUNK;
+    for (uint8_t index = 0; index < input.group.memberCount; ++index)
+        input.group.memberIds[index] = 11 + index;
+    length = encode(input, bytes, sizeof(bytes));
+    TEST_ASSERT_GREATER_THAN_UINT(0, length);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT(CORE_LINK_MAX_FRAME_SIZE, length);
+    output = {};
+    TEST_ASSERT_TRUE(decodeCoreLinkFrame(bytes, length, output));
+    TEST_ASSERT_EQUAL_UINT8(GROUP_UART_MEMBER_CHUNK, output.group.memberCount);
+    TEST_ASSERT_EQUAL_UINT32(14, output.group.memberIds[3]);
+
+    input.group.memberCount = GROUP_UART_MEMBER_CHUNK + 1;
+    TEST_ASSERT_EQUAL_UINT(0, encode(input, bytes, sizeof(bytes)));
+}
+
+void test_uart_group_power_parent_and_member_results_round_trip() {
+    CoreLinkPacket input = {};
+    input.type = CoreLinkMessageType::GROUPS;
+    input.group.version = GROUP_POWER_PROTOCOL_VERSION;
+    input.group.action = GroupProtocolAction::SET_POWER;
+    input.group.operationId = 0xF1234567;
+    input.group.mainLocalId = 7;
+    input.group.mainCoreId = 0x92345678;
+    input.group.groupId = 55;
+    input.group.power = 1;
+
+    uint8_t bytes[CORE_LINK_MAX_FRAME_SIZE] = {};
+    size_t length = encode(input, bytes, sizeof(bytes));
+    TEST_ASSERT_GREATER_THAN_UINT(0, length);
+    CoreLinkPacket output = {};
+    TEST_ASSERT_TRUE(decodeCoreLinkFrame(bytes, length, output));
+    TEST_ASSERT_EQUAL_UINT32(input.group.operationId, output.group.operationId);
+    TEST_ASSERT_EQUAL_UINT8(GROUP_POWER_PROTOCOL_VERSION, output.group.version);
+    TEST_ASSERT_EQUAL_UINT8(1, output.group.power);
+
+    input.group.action = GroupProtocolAction::QUERY_OPERATION;
+    length = encode(input, bytes, sizeof(bytes));
+    TEST_ASSERT_GREATER_THAN_UINT(0, length);
+    output = {};
+    TEST_ASSERT_TRUE(decodeCoreLinkFrame(bytes, length, output));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(GroupProtocolAction::QUERY_OPERATION),
+                            static_cast<uint8_t>(output.group.action));
+    TEST_ASSERT_EQUAL_UINT32(input.group.operationId, output.group.operationId);
+
+    input.group.action = GroupProtocolAction::MEMBER_RESULT;
+    input.group.result = GroupProtocolResult::EXECUTED;
+    input.group.memberLocalId = 11;
+    input.group.childCommandId = 0x71234567;
+    input.group.groupCount = 2;
+    input.group.memberOffset = 1;
+    input.group.memberCount = 0;
+    length = encode(input, bytes, sizeof(bytes));
+    TEST_ASSERT_GREATER_THAN_UINT(0, length);
+    output = {};
+    TEST_ASSERT_TRUE(decodeCoreLinkFrame(bytes, length, output));
+    TEST_ASSERT_EQUAL_UINT32(input.group.childCommandId,
+                             output.group.childCommandId);
+    TEST_ASSERT_EQUAL_UINT32(input.group.memberLocalId,
+                             output.group.memberLocalId);
+    TEST_ASSERT_EQUAL_UINT8(1, output.group.memberOffset);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(GroupProtocolResult::EXECUTED),
+                          static_cast<int>(output.group.result));
+
+    input.group.version = GROUP_PROTOCOL_VERSION;
+    TEST_ASSERT_EQUAL_UINT(0, encode(input, bytes, sizeof(bytes)));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_uart_announcement_frame_round_trip);
@@ -481,5 +578,7 @@ int main(int, char**) {
     RUN_TEST(test_lamp_reannouncement_preserves_state_only_for_same_v7_identity);
     RUN_TEST(test_uart_pairing_candidate_operation_and_result_round_trip);
     RUN_TEST(test_uart_removal_messages_round_trip_and_reject_missing_identity);
+    RUN_TEST(test_uart_group_metadata_and_bounded_member_chunks_round_trip);
+    RUN_TEST(test_uart_group_power_parent_and_member_results_round_trip);
     return UNITY_END();
 }

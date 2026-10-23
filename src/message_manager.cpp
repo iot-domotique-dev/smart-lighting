@@ -46,6 +46,8 @@ const char* messageTypeToString(
             return "UNPAIR_COMMIT";
         case MessageType::UNPAIR_REJECT:
             return "UNPAIR_REJECT";
+        case MessageType::GROUP_CONTROL:
+            return "GROUP_CONTROL";
     }
 
     return "UNKNOWN";

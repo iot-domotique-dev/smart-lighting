@@ -204,6 +204,50 @@ test('SecureStore reprend le même retrait et n’y enregistre aucun Bearer toke
   assert.equal(await store.loadPendingRemoval(), null);
 });
 
+test('une commande de groupe est sauvegardée avant POST et reprise sans nouveau POST', async () => {
+  const values = new Map();
+  const secureStore = {
+    getItemAsync: async (key) => values.get(key) ?? null,
+    setItemAsync: async (key, value) => { values.set(key, value); },
+    deleteItemAsync: async (key) => { values.delete(key); },
+  };
+  const originalLoad = Module._load;
+  Module._load = function loadWithSecureStore(request, parent, isMain) {
+    if (request === 'expo-secure-store') return secureStore;
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  let store;
+  try {
+    store = require('../src/features/groups/groupOperationStore.ts');
+  } finally {
+    Module._load = originalLoad;
+  }
+  const pending = { operationId: 0xf1234567, mainId: 4074601247,
+    groupId: 901, power: 'off', coreIp: '192.168.1.20' };
+  await store.savePendingGroupPowerOperation(pending);
+  assert.deepEqual(await store.loadPendingGroupPowerOperation(), pending);
+  assert.equal([...values.values()].some((value) => value.includes('Bearer')), false);
+  assert.equal([...values.values()].some((value) => value.includes('off')), true);
+  let posts = 0;
+  let reads = 0;
+  const recovered = await store.loadPendingGroupPowerOperation();
+  assert.equal(recovered.operationId, pending.operationId);
+  reads++;
+  assert.equal(posts, 0);
+  assert.equal(reads, 1);
+  await store.clearPendingGroupPowerOperation();
+  assert.equal(await store.loadPendingGroupPowerOperation(), null);
+});
+
+test('Groupes reprend un suivi interrompu par GET et n’émet pas de POST automatique', () => {
+  const source = fs.readFileSync(path.join(__dirname,
+    '../src/features/groups/GroupsScreen.tsx'), 'utf8');
+  assert.match(source, /await savePendingGroupPowerOperation\([\s\S]*?\);\s*postAttempted = true;\s*const response = await setGroupPower/);
+  assert.match(source, /loadPendingGroupPowerOperation\(\)[\s\S]*?getGroupOperation\(ip, saved\.operationId, token\)/);
+  assert.match(source, /aucun nouveau POST ne sera envoyé/i);
+  assert.doesNotMatch(source, /setGroupPower\(ip, saved\.mainId/);
+});
+
 test('succès déclenche une relecture inventory et le code attend la disparition avant retour liste', () => {
   assert.match(viewSource, /const inventory = await refreshRemovalInventory\(operation\.deviceId\)/);
   assert.match(viewSource, /if \(inventory === 'missing'\)[\s\S]*setSelectedId\(null\)/);

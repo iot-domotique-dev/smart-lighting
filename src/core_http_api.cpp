@@ -13,11 +13,18 @@
 #include "esp_random.h"
 #include "esp_app_desc.h"
 #include "esp_timer.h"
+#include "freertos/task.h"
 
 namespace {
 constexpr size_t MAX_COMMAND_BODY_BYTES = 64;
 constexpr size_t MAX_PAIRING_BODY_BYTES = 160;
 constexpr size_t MAX_REMOVAL_BODY_BYTES = 64;
+constexpr size_t MAX_GROUP_BODY_BYTES = 192;
+constexpr uint32_t GROUP_OPERATION_TIMEOUT_MS = 8000;
+constexpr uint32_t GROUP_POWER_OPERATION_TIMEOUT_MS = 20000;
+constexpr uint32_t GROUP_POWER_STATUS_REQUERY_MS = 5000;
+constexpr uint32_t GROUP_POWER_STATUS_QUERY_TIMEOUT_MS = 3000;
+constexpr uint32_t GROUP_OPERATION_RESULT_RETENTION_MS = 2U * 60U * 1000U;
 constexpr size_t MAX_AUTHORIZATION_BYTES = 160;
 char responseBuffer[CORE_API_MAX_RESPONSE_BYTES];
 
@@ -70,6 +77,16 @@ enum class RemovalRouteKind : uint8_t { NONE, CREATE, STATUS, INVALID };
 
 struct RemovalRoute {
     RemovalRouteKind kind;
+    uint32_t id;
+};
+
+enum class GroupRouteKind : uint8_t {
+    NONE, COLLECTION, ITEM, POWER, OPERATION, INVALID
+};
+
+struct GroupRoute {
+    GroupRouteKind kind;
+    uint32_t mainId;
     uint32_t id;
 };
 
@@ -163,6 +180,44 @@ RemovalRoute parseRemovalRoute(const char* uri) {
     return {RemovalRouteKind::NONE, 0};
 }
 
+GroupRoute parseGroupRoute(const char* uri) {
+    if (uri == nullptr) return {GroupRouteKind::NONE, 0, 0};
+    constexpr char OPERATION_PREFIX[] = "/api/v1/group-operations/";
+    if (strncmp(uri, OPERATION_PREFIX, sizeof(OPERATION_PREFIX) - 1) == 0) {
+        const char* start = uri + sizeof(OPERATION_PREFIX) - 1;
+        uint32_t id = 0;
+        if (strchr(start, '/') != nullptr || strchr(start, '?') != nullptr ||
+            !parseId(start, start + strlen(start), id))
+            return {GroupRouteKind::INVALID, 0, 0};
+        return {GroupRouteKind::OPERATION, 0, id};
+    }
+    constexpr char MODULE_PREFIX[] = "/api/v1/modules/";
+    if (strncmp(uri, MODULE_PREFIX, sizeof(MODULE_PREFIX) - 1) != 0)
+        return {GroupRouteKind::NONE, 0, 0};
+    const char* start = uri + sizeof(MODULE_PREFIX) - 1;
+    const char* suffix = strstr(start, "/groups");
+    if (suffix == nullptr) return {GroupRouteKind::NONE, 0, 0};
+    uint32_t mainId = 0;
+    if (!parseId(start, suffix, mainId) || strchr(uri, '?') != nullptr)
+        return {GroupRouteKind::INVALID, 0, 0};
+    if (strcmp(suffix, "/groups") == 0)
+        return {GroupRouteKind::COLLECTION, mainId, 0};
+    constexpr char ITEM_PREFIX[] = "/groups/";
+    if (strncmp(suffix, ITEM_PREFIX, sizeof(ITEM_PREFIX) - 1) == 0) {
+        const char* idStart = suffix + sizeof(ITEM_PREFIX) - 1;
+        const char* idEnd = strchr(idStart, '/');
+        if (idEnd == nullptr) idEnd = idStart + strlen(idStart);
+        uint32_t groupId = 0;
+        if (!parseId(idStart, idEnd, groupId))
+            return {GroupRouteKind::INVALID, 0, 0};
+        if (strcmp(idEnd, "/commands/power") == 0)
+            return {GroupRouteKind::POWER, mainId, groupId};
+        if (*idEnd != '\0') return {GroupRouteKind::INVALID, 0, 0};
+        return {GroupRouteKind::ITEM, mainId, groupId};
+    }
+    return {GroupRouteKind::INVALID, 0, 0};
+}
+
 void skipJsonWhitespace(const char*& cursor, const char* end) {
     while (cursor != end && (*cursor == ' ' || *cursor == '\t' ||
            *cursor == '\r' || *cursor == '\n')) ++cursor;
@@ -253,6 +308,89 @@ bool parseRemovalBody(const char* body, uint32_t& operationId) {
     return cursor == end;
 }
 
+struct GroupHttpBody {
+    uint32_t operationId;
+    uint32_t expectedRevision;
+    uint32_t lampId;
+    char name[MAX_GROUP_NAME_LENGTH];
+    char memberAction[8];
+    char power[4];
+    bool haveOperationId;
+    bool haveExpectedRevision;
+    bool haveLampId;
+    bool haveName;
+    bool haveMemberAction;
+    bool havePower;
+};
+
+bool parseGroupBody(const char* body, GroupHttpBody& parsed) {
+    parsed = {};
+    const char* cursor = body;
+    const char* end = body + strlen(body);
+    bool closed = false;
+    skipJsonWhitespace(cursor, end);
+    if (cursor == end || *cursor++ != '{') return false;
+    while (cursor != end) {
+        skipJsonWhitespace(cursor, end);
+        if (cursor != end && *cursor == '}') {
+            ++cursor;
+            closed = true;
+            break;
+        }
+        char key[32] = {};
+        if (!parseJsonString(cursor, end, key, sizeof(key))) return false;
+        skipJsonWhitespace(cursor, end);
+        if (cursor == end || *cursor++ != ':') return false;
+        skipJsonWhitespace(cursor, end);
+        if (strcmp(key, "operation_id") == 0 && !parsed.haveOperationId) {
+            if (!parseJsonUnsigned(cursor, end, parsed.operationId) ||
+                parsed.operationId == 0) return false;
+            parsed.haveOperationId = true;
+        } else if (strcmp(key, "expected_revision") == 0 &&
+                   !parsed.haveExpectedRevision) {
+            if (!parseJsonUnsigned(cursor, end, parsed.expectedRevision) ||
+                parsed.expectedRevision == 0) return false;
+            parsed.haveExpectedRevision = true;
+        } else if (strcmp(key, "lamp_id") == 0 && !parsed.haveLampId) {
+            if (!parseJsonUnsigned(cursor, end, parsed.lampId) ||
+                parsed.lampId == 0) return false;
+            parsed.haveLampId = true;
+        } else if (strcmp(key, "name") == 0 && !parsed.haveName) {
+            if (!parseJsonString(cursor, end, parsed.name,
+                                 sizeof(parsed.name))) return false;
+            parsed.haveName = true;
+        } else if (strcmp(key, "member_action") == 0 &&
+                   !parsed.haveMemberAction) {
+            if (!parseJsonString(cursor, end, parsed.memberAction,
+                                 sizeof(parsed.memberAction))) return false;
+            parsed.haveMemberAction = true;
+        } else if (strcmp(key, "power") == 0 && !parsed.havePower) {
+            if (!parseJsonString(cursor, end, parsed.power,
+                                 sizeof(parsed.power)) ||
+                (strcmp(parsed.power, "on") != 0 &&
+                 strcmp(parsed.power, "off") != 0)) return false;
+            parsed.havePower = true;
+        } else {
+            return false;
+        }
+        skipJsonWhitespace(cursor, end);
+        if (cursor != end && *cursor == ',') {
+            ++cursor;
+            skipJsonWhitespace(cursor, end);
+            if (cursor == end || *cursor == '}') return false;
+            continue;
+        }
+        if (cursor != end && *cursor == '}') {
+            ++cursor;
+            closed = true;
+            break;
+        }
+        return false;
+    }
+    skipJsonWhitespace(cursor, end);
+    return closed && cursor == end && parsed.haveOperationId;
+}
+
 const char* removalStateName(CorePairingResultCode result) {
     switch (result) {
         case CorePairingResultCode::PROCESSING: return "processing";
@@ -266,6 +404,258 @@ const char* removalStateName(CorePairingResultCode result) {
             return "failed";
         default: return "uncertain";
     }
+}
+
+const char* groupOperationStateName(CoreGroupOperationState state) {
+    switch (state) {
+        case CoreGroupOperationState::SENT: return "sent";
+        case CoreGroupOperationState::ACCEPTED: return "accepted";
+        case CoreGroupOperationState::PERSISTED: return "persisted";
+        case CoreGroupOperationState::COMPLETED: return "completed";
+        case CoreGroupOperationState::FAILED: return "failed";
+        case CoreGroupOperationState::UNCERTAIN: return "uncertain";
+        case CoreGroupOperationState::EMPTY: return "unknown";
+    }
+    return "unknown";
+}
+
+const char* groupResultName(GroupProtocolResult result) {
+    switch (result) {
+        case GroupProtocolResult::ACCEPTED: return "accepted";
+        case GroupProtocolResult::PERSISTED: return "persisted";
+        case GroupProtocolResult::COMPLETED: return "completed";
+        case GroupProtocolResult::NOT_FOUND: return "not_found";
+        case GroupProtocolResult::REVISION_CONFLICT: return "revision_conflict";
+        case GroupProtocolResult::INVALID: return "invalid";
+        case GroupProtocolResult::STORAGE_UNAVAILABLE: return "storage_unavailable";
+        case GroupProtocolResult::BUSY: return "busy";
+        case GroupProtocolResult::FAILED: return "failed";
+        case GroupProtocolResult::UNCERTAIN: return "uncertain";
+        case GroupProtocolResult::PARTIAL: return "partial";
+        case GroupProtocolResult::EMPTY_GROUP: return "empty_group";
+        case GroupProtocolResult::OFFLINE: return "offline";
+        case GroupProtocolResult::UNSUPPORTED: return "unsupported";
+        case GroupProtocolResult::EXECUTED: return "executed";
+        case GroupProtocolResult::IN_PROGRESS: return "in_progress";
+        case GroupProtocolResult::SUPERSEDED: return "superseded";
+        case GroupProtocolResult::NONE: return "none";
+    }
+    return "failed";
+}
+
+bool groupOperationTerminal(CoreGroupOperationState state) {
+    return state == CoreGroupOperationState::PERSISTED ||
+           state == CoreGroupOperationState::COMPLETED ||
+           state == CoreGroupOperationState::FAILED ||
+           state == CoreGroupOperationState::UNCERTAIN;
+}
+
+bool groupOperationReusable(const CoreGroupOperationRecord& operation,
+                            uint32_t now) {
+    if (operation.state == CoreGroupOperationState::EMPTY) return true;
+    // An uncertain outcome can still be resolved by a late MAIN result or ACK.
+    // Keep its operation ID and member correlations until it is resolved.
+    if (operation.state == CoreGroupOperationState::UNCERTAIN) return false;
+    return (operation.state == CoreGroupOperationState::PERSISTED ||
+            operation.state == CoreGroupOperationState::COMPLETED ||
+            operation.state == CoreGroupOperationState::FAILED) &&
+        operation.retainedAt != 0 &&
+        now - operation.retainedAt >= GROUP_OPERATION_RESULT_RETENTION_MS;
+}
+
+void updateGroupOperationRetention(CoreGroupOperationRecord& operation,
+                                   CoreGroupOperationState previousState,
+                                   uint32_t now) {
+    if (operation.state == previousState) return;
+    if (operation.state == CoreGroupOperationState::SENT ||
+        operation.state == CoreGroupOperationState::ACCEPTED) {
+        operation.retainedAt = 0;
+    } else if (operation.state == CoreGroupOperationState::UNCERTAIN ||
+               operation.state == CoreGroupOperationState::PERSISTED ||
+               operation.state == CoreGroupOperationState::COMPLETED ||
+               operation.state == CoreGroupOperationState::FAILED) {
+        operation.retainedAt = now;
+    }
+}
+
+bool sameGroupRequest(const GroupProtocolPayload& left,
+                      const GroupProtocolPayload& right) {
+    return left.version == right.version && left.action == right.action &&
+        left.mainLocalId == right.mainLocalId &&
+        left.mainCoreId == right.mainCoreId && left.groupId == right.groupId &&
+        left.expectedRevision == right.expectedRevision &&
+        left.memberLocalId == right.memberLocalId && left.power == right.power &&
+        strcmp(left.name, right.name) == 0;
+}
+
+bool isGroupPowerOperation(const CoreGroupOperationRecord& operation) {
+    return operation.request.version == GROUP_POWER_PROTOCOL_VERSION &&
+        operation.request.action == GroupProtocolAction::SET_POWER;
+}
+
+bool isGroupMemberResultTerminal(GroupProtocolResult result) {
+    return result == GroupProtocolResult::EXECUTED ||
+        result == GroupProtocolResult::FAILED ||
+        result == GroupProtocolResult::OFFLINE ||
+        result == GroupProtocolResult::UNSUPPORTED ||
+        result == GroupProtocolResult::UNCERTAIN ||
+        result == GroupProtocolResult::SUPERSEDED;
+}
+
+void updateGroupPowerAggregate(CoreGroupOperationRecord& operation) {
+    if (!isGroupPowerOperation(operation) || operation.expectedGroupCount == 0 ||
+        operation.receivedGroupCount != operation.expectedGroupCount) return;
+    bool allTerminal = true;
+    bool anyExecuted = false;
+    bool anyFailure = false;
+    bool anyUncertain = false;
+    for (uint8_t index = 0; index < operation.expectedGroupCount; ++index) {
+        const CoreGroupMemberResult& member = operation.members[index];
+        if (!member.valid || !isGroupMemberResultTerminal(member.result)) {
+            allTerminal = false;
+            continue;
+        }
+        if (member.result == GroupProtocolResult::EXECUTED) anyExecuted = true;
+        if (member.result == GroupProtocolResult::FAILED ||
+            member.result == GroupProtocolResult::OFFLINE ||
+            member.result == GroupProtocolResult::UNSUPPORTED) anyFailure = true;
+        if (member.result == GroupProtocolResult::UNCERTAIN ||
+            member.result == GroupProtocolResult::SUPERSEDED) anyUncertain = true;
+    }
+    if (!allTerminal) return;
+    if (anyUncertain) operation.result = GroupProtocolResult::UNCERTAIN;
+    else if (anyFailure && anyExecuted) operation.result = GroupProtocolResult::PARTIAL;
+    else if (anyFailure) operation.result = GroupProtocolResult::FAILED;
+    else operation.result = GroupProtocolResult::COMPLETED;
+    operation.state = operation.result == GroupProtocolResult::UNCERTAIN
+        ? CoreGroupOperationState::UNCERTAIN
+        : (operation.result == GroupProtocolResult::FAILED
+            ? CoreGroupOperationState::FAILED : CoreGroupOperationState::COMPLETED);
+}
+
+bool appendJsonString(size_t& used, const char* value) {
+    if (value == nullptr || used >= sizeof(responseBuffer) - 1) return false;
+    responseBuffer[used++] = '"';
+    for (const unsigned char* cursor =
+             reinterpret_cast<const unsigned char*>(value);
+         *cursor != 0; ++cursor) {
+        if (*cursor == '"' || *cursor == '\\') {
+            if (used + 2 >= sizeof(responseBuffer)) return false;
+            responseBuffer[used++] = '\\';
+            responseBuffer[used++] = static_cast<char>(*cursor);
+        } else if (*cursor < 0x20) {
+            if (used + 6 >= sizeof(responseBuffer)) return false;
+            static constexpr char HEX[] = "0123456789abcdef";
+            responseBuffer[used++] = '\\';
+            responseBuffer[used++] = 'u';
+            responseBuffer[used++] = '0';
+            responseBuffer[used++] = '0';
+            responseBuffer[used++] = HEX[*cursor >> 4];
+            responseBuffer[used++] = HEX[*cursor & 0x0f];
+        } else {
+            if (used + 1 >= sizeof(responseBuffer)) return false;
+            responseBuffer[used++] = static_cast<char>(*cursor);
+        }
+    }
+    if (used + 1 >= sizeof(responseBuffer)) return false;
+    responseBuffer[used++] = '"';
+    responseBuffer[used] = '\0';
+    return true;
+}
+
+bool appendGroupRecordJson(size_t& used, const GroupRegistry& snapshot,
+                           uint8_t groupIndex, uint32_t mainId) {
+    if (groupIndex >= snapshot.count || used >= sizeof(responseBuffer)) return false;
+    const LampGroup& group = snapshot.groups[groupIndex];
+    int length = snprintf(responseBuffer + used, sizeof(responseBuffer) - used,
+        "%s{\"id\":%lu,\"main_id\":%lu,\"name\":",
+        groupIndex == 0 ? "" : ",", static_cast<unsigned long>(group.id),
+        static_cast<unsigned long>(mainId));
+    if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer) - used)
+        return false;
+    used += static_cast<size_t>(length);
+    if (!appendJsonString(used, group.name)) return false;
+    length = snprintf(responseBuffer + used, sizeof(responseBuffer) - used,
+        ",\"revision\":%lu,\"member_ids\":[",
+        static_cast<unsigned long>(group.revision));
+    if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer) - used)
+        return false;
+    used += static_cast<size_t>(length);
+    for (uint8_t member = 0; member < group.lampCount; ++member) {
+        const uint32_t lampV7Id = makeCoreModuleId(mainId, group.lampIds[member]);
+        length = snprintf(responseBuffer + used, sizeof(responseBuffer) - used,
+            "%s%lu", member == 0 ? "" : ",",
+            static_cast<unsigned long>(lampV7Id));
+        if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer) - used)
+            return false;
+        used += static_cast<size_t>(length);
+    }
+    constexpr char END[] = "]}";
+    if (sizeof(END) - 1 >= sizeof(responseBuffer) - used) return false;
+    memcpy(responseBuffer + used, END, sizeof(END) - 1);
+    used += sizeof(END) - 1;
+    responseBuffer[used] = '\0';
+    return true;
+}
+
+const char* groupMemberStateName(GroupProtocolResult result) {
+    switch (result) {
+        case GroupProtocolResult::IN_PROGRESS: return "in_progress";
+        case GroupProtocolResult::EXECUTED: return "executed";
+        case GroupProtocolResult::FAILED: return "failed";
+        case GroupProtocolResult::OFFLINE: return "offline";
+        case GroupProtocolResult::UNSUPPORTED: return "unsupported";
+        case GroupProtocolResult::UNCERTAIN:
+        case GroupProtocolResult::SUPERSEDED: return "uncertain";
+        default: return "unknown";
+    }
+}
+
+bool appendGroupOperationJson(const CoreGroupOperationRecord& operation) {
+    const int length = snprintf(responseBuffer, sizeof(responseBuffer),
+        "{\"operation\":{\"id\":%lu,\"state\":\"%s\",\"result\":\"%s\",\"group_id\":%lu,\"revision\":%lu",
+        static_cast<unsigned long>(operation.id),
+        groupOperationStateName(operation.state), groupResultName(operation.result),
+        static_cast<unsigned long>(operation.request.groupId),
+        static_cast<unsigned long>(operation.resultRevision));
+    if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer))
+        return false;
+    size_t used = static_cast<size_t>(length);
+    if (operation.request.version == GROUP_POWER_PROTOCOL_VERSION &&
+        operation.request.action == GroupProtocolAction::SET_POWER) {
+        constexpr char MEMBERS[] = ",\"members\":[";
+        if (sizeof(MEMBERS) - 1 >= sizeof(responseBuffer) - used) return false;
+        memcpy(responseBuffer + used, MEMBERS, sizeof(MEMBERS) - 1);
+        used += sizeof(MEMBERS) - 1;
+        bool first = true;
+        for (uint8_t index = 0; index < MAX_GROUP_LAMPS; ++index) {
+            const CoreGroupMemberResult& member = operation.members[index];
+            if (!member.valid) continue;
+            const uint32_t lampId = makeCoreModuleId(
+                operation.request.mainCoreId, member.localId);
+            const int memberLength = snprintf(responseBuffer + used,
+                sizeof(responseBuffer) - used,
+                "%s{\"lamp_id\":%lu,\"child_id\":%lu,\"state\":\"%s\",\"result\":\"%s\"}",
+                first ? "" : ",", static_cast<unsigned long>(lampId),
+                static_cast<unsigned long>(member.childCommandId),
+                groupMemberStateName(member.result), groupResultName(member.result));
+            if (memberLength <= 0 ||
+                static_cast<size_t>(memberLength) >= sizeof(responseBuffer) - used)
+                return false;
+            used += static_cast<size_t>(memberLength);
+            first = false;
+        }
+        constexpr char CLOSE_MEMBERS[] = "]";
+        if (sizeof(CLOSE_MEMBERS) - 1 >= sizeof(responseBuffer) - used) return false;
+        memcpy(responseBuffer + used, CLOSE_MEMBERS, sizeof(CLOSE_MEMBERS) - 1);
+        used += sizeof(CLOSE_MEMBERS) - 1;
+    }
+    constexpr char CLOSE[] = "}}";
+    if (sizeof(CLOSE) - 1 >= sizeof(responseBuffer) - used) return false;
+    memcpy(responseBuffer + used, CLOSE, sizeof(CLOSE) - 1);
+    used += sizeof(CLOSE) - 1;
+    responseBuffer[used] = '\0';
+    return true;
 }
 
 bool parsePairOperationBody(const char* body, uint32_t& sessionId,
@@ -646,7 +1036,420 @@ CoreHttpApi::CoreHttpApi(DeviceRegistry& coreRegistry,
       registryMutex(&coreRegistryMutex), removalOperationId(0),
       removalTargetId(0), removalMainLocalId(0), removalMainCoreId(0),
       removalLampLocalId(0), removalLastQueryAt(0),
-      removalResult(CorePairingResultCode::NONE), started(false), server(nullptr) {}
+      removalResult(CorePairingResultCode::NONE), groupStateMutex(nullptr),
+      activeGroupOperationId(0), nextGroupOperationSlot(0), started(false),
+      server(nullptr) {
+    memset(groupOperations, 0, sizeof(groupOperations));
+    groupReadOperation = {};
+}
+
+esp_err_t CoreHttpApi::handleGroupRequest(httpd_req_t* request) {
+    const GroupRoute route = parseGroupRoute(request->uri);
+    if (route.kind == GroupRouteKind::INVALID)
+        return sendError(request, 400, "bad_request", "The group path or ID is invalid.");
+    if (!coreHttpTokenConfigured(apiToken))
+        return sendError(request, 503, "group_api_disabled",
+                         "Configure a valid API token to enable group configuration.");
+    if (!authorized(request, apiToken))
+        return sendError(request, 401, "unauthorized", "A valid Bearer token is required.");
+    if (groupStateMutex == nullptr)
+        return sendError(request, 503, "group_api_unavailable",
+                         "The group operation tracker is unavailable.");
+
+    if (route.kind == GroupRouteKind::OPERATION) {
+        if (request->method != HTTP_GET)
+            return sendError(request, 405, "method_not_allowed",
+                             "Use GET to inspect a group operation.", "GET");
+        if (xSemaphoreTake(groupStateMutex, pdMS_TO_TICKS(250)) != pdTRUE)
+            return sendError(request, 503, "core_busy", "The CORE is busy; retry shortly.");
+        CoreGroupOperationRecord* found = nullptr;
+        for (uint8_t index = 0; index < CORE_GROUP_OPERATION_SLOTS; ++index) {
+            if (groupOperations[index].id == route.id &&
+                groupOperations[index].state != CoreGroupOperationState::EMPTY) {
+                found = &groupOperations[index];
+                break;
+            }
+        }
+        CoreGroupOperationRecord snapshot = {};
+        bool queryMainStatus = false;
+        if (found != nullptr) {
+            const uint32_t now = millis();
+            if (isGroupPowerOperation(*found) &&
+                found->state == CoreGroupOperationState::UNCERTAIN &&
+                (activeGroupOperationId == 0 || activeGroupOperationId == route.id) &&
+                now - found->lastQueryAt >= GROUP_POWER_STATUS_REQUERY_MS) {
+                found->lastQueryAt = now;
+                activeGroupOperationId = route.id;
+                queryMainStatus = true;
+            }
+            snapshot = *found;
+        }
+        (void)xSemaphoreGive(groupStateMutex);
+        if (found == nullptr)
+            return sendError(request, 404, "group_operation_not_found",
+                "The operation is unknown or has been evicted from the CORE's in-memory tracker.");
+        if (queryMainStatus) {
+            CoreLinkPacket query = {};
+            query.sequence = static_cast<uint16_t>(snapshot.id);
+            query.type = CoreLinkMessageType::GROUPS;
+            query.group = snapshot.request;
+            query.group.action = GroupProtocolAction::QUERY_OPERATION;
+            if (!uart.send(query) &&
+                xSemaphoreTake(groupStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                if (activeGroupOperationId == snapshot.id)
+                    activeGroupOperationId = 0;
+                (void)xSemaphoreGive(groupStateMutex);
+            }
+        }
+        if (!appendGroupOperationJson(snapshot))
+            return sendError(request, 500, "internal_error", "The response could not be serialized.");
+        return sendJson(request, 200, responseBuffer, strlen(responseBuffer));
+    }
+
+    if (route.kind != GroupRouteKind::COLLECTION && route.kind != GroupRouteKind::ITEM &&
+        route.kind != GroupRouteKind::POWER)
+        return sendError(request, 404, "not_found", "The requested group resource was not found.");
+
+    if (apiToken == nullptr || !coreHttpTokenConfigured(apiToken))
+        return sendError(request, 503, "group_api_disabled",
+                         "Configure a valid API token to enable group configuration.");
+    if (route.kind == GroupRouteKind::POWER && request->method != HTTP_POST)
+        return sendError(request, 405, "method_not_allowed",
+                         "Use POST to submit a group power operation.", "POST");
+    if ((route.kind == GroupRouteKind::COLLECTION && request->method == HTTP_GET) ||
+        (route.kind == GroupRouteKind::ITEM && request->method == HTTP_GET)) {
+        // Read requests are proxied to MAIN and only answered after the complete
+        // metadata/member stream has been validated.
+    } else if ((route.kind == GroupRouteKind::COLLECTION && request->method != HTTP_POST) ||
+               (route.kind == GroupRouteKind::ITEM &&
+                request->method != HTTP_PATCH && request->method != HTTP_DELETE)) {
+        return sendError(request, 405, "method_not_allowed",
+            route.kind == GroupRouteKind::COLLECTION
+                ? "Use GET or POST for the group collection."
+                : "Use GET, PATCH, DELETE, or the group power command.",
+            route.kind == GroupRouteKind::COLLECTION ? "GET, POST" : "GET, PATCH, DELETE, POST");
+    }
+
+    if (route.kind != GroupRouteKind::COLLECTION && route.id == 0)
+        return sendError(request, 400, "bad_request", "The group ID must be nonzero.");
+
+    if (registryMutex == nullptr || *registryMutex == nullptr ||
+        xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(250)) != pdTRUE)
+        return sendError(request, 503, "core_busy", "The CORE is busy; retry shortly.");
+    const Device* main = findDeviceById(registry, route.mainId);
+    uint8_t mainCount = 0;
+    for (uint8_t index = 0; index < registry.count; ++index)
+        if (registry.devices[index].role == DeviceRole::MAIN) ++mainCount;
+    if (main == nullptr || main->role != DeviceRole::MAIN || mainCount != 1 ||
+        main->localId == 0 ||
+        makeCoreModuleId(CORE_LOGICAL_ID, main->localId) != main->id) {
+        (void)xSemaphoreGive(*registryMutex);
+        return sendError(request, 404, "unknown_main", "The requested MAIN was not found.");
+    }
+    if (main->status != DeviceStatus::ONLINE) {
+        (void)xSemaphoreGive(*registryMutex);
+        return sendError(request, 409, "main_offline", "The MAIN is offline.");
+    }
+    if (!hasDeviceCapability(*main, DEVICE_CAP_GROUPS)) {
+        (void)xSemaphoreGive(*registryMutex);
+        return sendError(request, 409, "groups_unsupported",
+                         "The MAIN does not announce group configuration support.");
+    }
+    const uint32_t mainLocalId = main->localId;
+    const uint32_t mainCoreId = main->id;
+    (void)xSemaphoreGive(*registryMutex);
+
+    GroupProtocolPayload groupRequest = {};
+    groupRequest.version = route.kind == GroupRouteKind::POWER
+        ? GROUP_POWER_PROTOCOL_VERSION : GROUP_PROTOCOL_VERSION;
+    groupRequest.mainLocalId = mainLocalId;
+    groupRequest.mainCoreId = mainCoreId;
+    const bool readRequest = request->method == HTTP_GET;
+    GroupHttpBody body = {};
+    uint32_t operationId = 0;
+
+    if (readRequest) {
+        groupRequest.action = route.kind == GroupRouteKind::COLLECTION
+            ? GroupProtocolAction::LIST : GroupProtocolAction::GET;
+        groupRequest.groupId = route.id;
+        operationId = esp_random();
+        if (operationId == 0) operationId = 1;
+        groupRequest.operationId = operationId;
+    } else {
+        if (request->content_len > MAX_GROUP_BODY_BYTES)
+            return sendError(request, 413, "payload_too_large",
+                             "The group body must not exceed 192 bytes.");
+        if (!isJsonContentType(request))
+            return sendError(request, 415, "unsupported_media_type",
+                             "Content-Type must be application/json.");
+        char bodyText[MAX_GROUP_BODY_BYTES + 1] = {};
+        if (!parsePairingBody(request, bodyText, sizeof(bodyText)) ||
+            !parseGroupBody(bodyText, body))
+            return sendError(request, 400, "bad_request",
+                             "The group JSON body is invalid or contains unsupported fields.");
+        operationId = body.operationId;
+        groupRequest.operationId = operationId;
+        if (route.kind == GroupRouteKind::POWER) {
+            if (request->method != HTTP_POST || !body.havePower ||
+                body.haveName || body.haveExpectedRevision || body.haveLampId ||
+                body.haveMemberAction)
+                return sendError(request, 400, "bad_request",
+                    "Group power expects operation_id and power set to on or off.");
+            groupRequest.action = GroupProtocolAction::SET_POWER;
+            groupRequest.groupId = route.id;
+            groupRequest.power = strcmp(body.power, "on") == 0 ? 1 : 0;
+        } else if (route.kind == GroupRouteKind::COLLECTION) {
+            if (request->method != HTTP_POST || !body.haveName ||
+                body.haveExpectedRevision || body.haveLampId || body.haveMemberAction)
+                return sendError(request, 400, "bad_request",
+                    "Create expects only operation_id and a 1 to 31 character group name.");
+            LampGroup nameCheck = {};
+            if (!setGroupName(nameCheck, body.name))
+                return sendError(request, 400, "invalid_group_name",
+                                 "The group name is invalid or too long.");
+            groupRequest.action = GroupProtocolAction::CREATE;
+            // A stable group ID derived from the caller's idempotency key makes
+            // an identical retry safe even if the HTTP response was lost.
+            groupRequest.groupId = operationId;
+            strncpy(groupRequest.name, body.name, sizeof(groupRequest.name) - 1);
+        } else {
+            if (!body.haveExpectedRevision)
+                return sendError(request, 400, "bad_request",
+                                 "A nonzero expected_revision is required for changes.");
+            groupRequest.groupId = route.id;
+            groupRequest.expectedRevision = body.expectedRevision;
+            if (request->method == HTTP_DELETE) {
+                if (body.haveName || body.haveLampId || body.haveMemberAction)
+                    return sendError(request, 400, "bad_request",
+                                     "Delete expects operation_id and expected_revision only.");
+                groupRequest.action = GroupProtocolAction::DELETE_GROUP;
+            } else if (body.haveName && !body.haveLampId && !body.haveMemberAction) {
+                LampGroup nameCheck = {};
+                if (!setGroupName(nameCheck, body.name))
+                    return sendError(request, 400, "invalid_group_name",
+                                     "The group name is invalid or too long.");
+                groupRequest.action = GroupProtocolAction::RENAME;
+                strncpy(groupRequest.name, body.name, sizeof(groupRequest.name) - 1);
+            } else if (!body.haveName && body.haveLampId && body.haveMemberAction &&
+                       (strcmp(body.memberAction, "add") == 0 ||
+                        strcmp(body.memberAction, "remove") == 0)) {
+                if (xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(250)) != pdTRUE)
+                    return sendError(request, 503, "core_busy", "The CORE is busy; retry shortly.");
+                const Device* lamp = findDeviceById(registry, body.lampId);
+                const bool validLamp = lamp != nullptr &&
+                    lamp->role == DeviceRole::LAMP && lamp->parentId == mainCoreId &&
+                    lamp->localId != 0 &&
+                    makeCoreModuleId(mainCoreId, lamp->localId) == lamp->id;
+                if (validLamp) groupRequest.memberLocalId = lamp->localId;
+                (void)xSemaphoreGive(*registryMutex);
+                if (!validLamp)
+                    return sendError(request, 404, "unknown_lamp",
+                        "The lamp is not registered under this MAIN.");
+                groupRequest.action = strcmp(body.memberAction, "add") == 0
+                    ? GroupProtocolAction::ADD_MEMBER
+                    : GroupProtocolAction::REMOVE_MEMBER;
+            } else {
+                return sendError(request, 400, "bad_request",
+                    "Patch expects either name or member_action with lamp_id.");
+            }
+        }
+    }
+
+    int slot = -1;
+    if (xSemaphoreTake(groupStateMutex, pdMS_TO_TICKS(250)) != pdTRUE)
+        return sendError(request, 503, "core_busy", "The CORE is busy; retry shortly.");
+    if (!readRequest) {
+        for (uint8_t index = 0; index < CORE_GROUP_OPERATION_SLOTS; ++index) {
+            if (groupOperations[index].id == operationId &&
+                groupOperations[index].state != CoreGroupOperationState::EMPTY) {
+                slot = index;
+                if (!sameGroupRequest(groupOperations[index].request, groupRequest)) {
+                    (void)xSemaphoreGive(groupStateMutex);
+                    return sendError(request, 409, "operation_id_conflict",
+                        "This operation_id is already associated with another group request.");
+                }
+                break;
+            }
+        }
+    }
+    if (slot >= 0) {
+        const CoreGroupOperationRecord saved = groupOperations[slot];
+        (void)xSemaphoreGive(groupStateMutex);
+        const uint16_t status = groupOperationTerminal(saved.state) ? 200 : 202;
+        if (!appendGroupOperationJson(saved))
+            return sendError(request, 500, "internal_error", "The response could not be serialized.");
+        return sendJson(request, status, responseBuffer, strlen(responseBuffer));
+    }
+    if (activeGroupOperationId != 0) {
+        (void)xSemaphoreGive(groupStateMutex);
+        return sendError(request, 409, "group_operation_in_progress",
+                         "Another group operation is still being resolved.");
+    }
+    if (readRequest) {
+        if (groupReadOperation.state != CoreGroupOperationState::EMPTY) {
+            (void)xSemaphoreGive(groupStateMutex);
+            return sendError(request, 409, "group_operation_in_progress",
+                "A group read is still being resolved; retry after it completes.");
+        }
+        groupReadOperation = {};
+        groupReadOperation.id = operationId;
+        groupReadOperation.request = groupRequest;
+        groupReadOperation.startedAt = millis();
+        groupReadOperation.lastQueryAt = groupReadOperation.startedAt;
+        groupReadOperation.state = CoreGroupOperationState::SENT;
+        groupReadOperation.result = GroupProtocolResult::NONE;
+        if (groupRequest.action == GroupProtocolAction::GET) {
+            groupReadOperation.expectedGroupCount = 1;
+            groupReadOperation.listStarted = true;
+        }
+        activeGroupOperationId = operationId;
+    } else {
+        const uint32_t now = millis();
+        for (uint8_t attempt = 0; attempt < CORE_GROUP_OPERATION_SLOTS; ++attempt) {
+            const uint8_t candidate = static_cast<uint8_t>(
+                (nextGroupOperationSlot + attempt) % CORE_GROUP_OPERATION_SLOTS);
+            const CoreGroupOperationRecord& current = groupOperations[candidate];
+            if (groupOperationReusable(current, now)) {
+                slot = candidate;
+                nextGroupOperationSlot = static_cast<uint8_t>(
+                    (candidate + 1) % CORE_GROUP_OPERATION_SLOTS);
+                break;
+            }
+        }
+        if (slot < 0) {
+            (void)xSemaphoreGive(groupStateMutex);
+            return sendError(request, 409, "group_operation_history_full",
+                "Recent group changes and command results are retained; wait for expiration before submitting another.");
+        }
+        groupOperations[slot] = {};
+        groupOperations[slot].id = operationId;
+        groupOperations[slot].request = groupRequest;
+        groupOperations[slot].startedAt = millis();
+        groupOperations[slot].lastQueryAt = groupOperations[slot].startedAt;
+        groupOperations[slot].state = CoreGroupOperationState::SENT;
+        groupOperations[slot].result = GroupProtocolResult::NONE;
+        activeGroupOperationId = operationId;
+    }
+    (void)xSemaphoreGive(groupStateMutex);
+
+    CoreLinkPacket outbound = {};
+    outbound.sequence = static_cast<uint16_t>(operationId);
+    outbound.type = CoreLinkMessageType::GROUPS;
+    outbound.group = groupRequest;
+    if (!uart.send(outbound)) {
+        if (xSemaphoreTake(groupStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            if (readRequest && groupReadOperation.id == operationId) {
+                groupReadOperation = {};
+            } else if (!readRequest && slot >= 0 &&
+                       groupOperations[slot].id == operationId) {
+                groupOperations[slot].state = CoreGroupOperationState::UNCERTAIN;
+                groupOperations[slot].result = GroupProtocolResult::UNCERTAIN;
+                groupOperations[slot].retainedAt = millis();
+            }
+            if (activeGroupOperationId == operationId) activeGroupOperationId = 0;
+            (void)xSemaphoreGive(groupStateMutex);
+        }
+        if (readRequest)
+            return sendError(request, 503, "group_read_unavailable",
+                "The read could not be sent to MAIN. Repeat the GET safely.");
+        return sendError(request, 503, "group_transport_uncertain",
+            "The MAIN result is unknown. Inspect the same operation_id before retrying.");
+    }
+
+    if (!readRequest) {
+        const int length = snprintf(responseBuffer, sizeof(responseBuffer),
+            "{\"operation\":{\"id\":%lu,\"state\":\"sent\"}}",
+            static_cast<unsigned long>(operationId));
+        if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer))
+            return sendError(request, 500, "internal_error", "The response could not be serialized.");
+        char location[64] = {};
+        const int locationLength = snprintf(location, sizeof(location),
+            "/api/v1/group-operations/%lu", static_cast<unsigned long>(operationId));
+        if (locationLength <= 0 || static_cast<size_t>(locationLength) >= sizeof(location) ||
+            httpd_resp_set_status(request, statusText(202)) != ESP_OK ||
+            httpd_resp_set_hdr(request, "Location", location) != ESP_OK)
+            return ESP_FAIL;
+        return sendJson(request, 202, responseBuffer, static_cast<size_t>(length));
+    }
+
+    const uint32_t waitStarted = millis();
+    CoreGroupReadOperationRecord completed = {};
+    bool isTerminal = false;
+    while (millis() - waitStarted < GROUP_OPERATION_TIMEOUT_MS) {
+        if (xSemaphoreTake(groupStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            if (groupReadOperation.id == operationId &&
+                groupReadOperation.state != CoreGroupOperationState::EMPTY) {
+                completed = groupReadOperation;
+                isTerminal = groupOperationTerminal(completed.state);
+                if (isTerminal) groupReadOperation = {};
+            }
+            (void)xSemaphoreGive(groupStateMutex);
+        }
+        if (isTerminal) break;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (!isTerminal) {
+        if (xSemaphoreTake(groupStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            if (groupReadOperation.id == operationId &&
+                groupReadOperation.state != CoreGroupOperationState::EMPTY) {
+                completed = groupReadOperation;
+                completed.state = CoreGroupOperationState::UNCERTAIN;
+                completed.result = GroupProtocolResult::UNCERTAIN;
+                groupReadOperation = {};
+            }
+            if (activeGroupOperationId == operationId) activeGroupOperationId = 0;
+            (void)xSemaphoreGive(groupStateMutex);
+        }
+        return sendError(request, 503, "group_result_uncertain",
+            "The MAIN did not return a complete group snapshot. Repeat this read request safely.");
+    }
+    if (completed.state == CoreGroupOperationState::FAILED ||
+        completed.state == CoreGroupOperationState::UNCERTAIN) {
+        switch (completed.result) {
+            case GroupProtocolResult::NOT_FOUND:
+                return sendError(request, 404, "group_not_found", "The group was not found on MAIN.");
+            case GroupProtocolResult::REVISION_CONFLICT:
+                return sendError(request, 409, "revision_conflict",
+                    "The group changed elsewhere. Reload it before editing.");
+            case GroupProtocolResult::STORAGE_UNAVAILABLE:
+                return sendError(request, 503, "group_storage_unavailable",
+                    "MAIN could not read its persisted group configuration.");
+            case GroupProtocolResult::BUSY:
+                return sendError(request, 409, "group_operation_in_progress",
+                    "MAIN is processing another group configuration request.");
+            default:
+                return sendError(request, 503, "group_result_uncertain",
+                    "MAIN did not confirm a complete result. Repeat this read request safely.");
+        }
+    }
+    size_t used = 0;
+    responseBuffer[0] = '\0';
+    int length = 0;
+    if (route.kind == GroupRouteKind::COLLECTION) {
+        length = snprintf(responseBuffer, sizeof(responseBuffer), "{\"groups\":[");
+        if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer))
+            return sendError(request, 500, "internal_error", "The response could not be serialized.");
+        used = static_cast<size_t>(length);
+        for (uint8_t index = 0; index < completed.snapshot.count; ++index) {
+            if (!appendGroupRecordJson(used, completed.snapshot, index, mainCoreId))
+                return sendError(request, 500, "internal_error", "The response could not be serialized.");
+        }
+        length = snprintf(responseBuffer + used, sizeof(responseBuffer) - used,
+                          "],\"count\":%u}",
+                          static_cast<unsigned>(completed.snapshot.count));
+    } else {
+        length = snprintf(responseBuffer, sizeof(responseBuffer), "{\"group\":");
+        if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer))
+            return sendError(request, 500, "internal_error", "The response could not be serialized.");
+        used = static_cast<size_t>(length);
+        if (!appendGroupRecordJson(used, completed.snapshot, 0, mainCoreId))
+            return sendError(request, 500, "internal_error", "The response could not be serialized.");
+        length = snprintf(responseBuffer + used, sizeof(responseBuffer) - used, "}");
+    }
+    if (length <= 0 || static_cast<size_t>(length) >= sizeof(responseBuffer) - used)
+        return sendError(request, 500, "internal_error", "The response could not be serialized.");
+    return sendJson(request, 200, responseBuffer, used + static_cast<size_t>(length));
+}
 
 esp_err_t CoreHttpApi::handleRemovalRequest(httpd_req_t* request) {
     const RemovalRoute route = parseRemovalRoute(request->uri);
@@ -1177,6 +1980,401 @@ esp_err_t CoreHttpApi::handlePairingRequest(httpd_req_t* request) {
     return sendError(request, 404, "not_found", "The requested pairing resource was not found.");
 }
 
+void CoreHttpApi::handleGroupPacket(const CoreLinkPacket& packet) {
+    if (packet.type != CoreLinkMessageType::GROUPS || groupStateMutex == nullptr)
+        return;
+    const GroupProtocolPayload& group = packet.group;
+    if ((group.version != GROUP_PROTOCOL_VERSION &&
+         group.version != GROUP_POWER_PROTOCOL_VERSION) || group.operationId == 0 ||
+        group.mainLocalId == 0 || group.mainCoreId == 0 ||
+        !isValidGroupProtocolAction(group.action) ||
+        !isValidGroupProtocolResult(group.result) ||
+        !isValidGroupProtocolPayload(group, GROUP_UART_MEMBER_CHUNK) ||
+        xSemaphoreTake(groupStateMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+
+    CoreGroupOperationRecord* operation = nullptr;
+    bool readOperation = false;
+    for (uint8_t index = 0; index < CORE_GROUP_OPERATION_SLOTS; ++index) {
+        if (groupOperations[index].id == group.operationId &&
+            groupOperations[index].state != CoreGroupOperationState::EMPTY) {
+            operation = &groupOperations[index];
+            break;
+        }
+    }
+    if (operation == nullptr && groupReadOperation.id == group.operationId &&
+        groupReadOperation.state != CoreGroupOperationState::EMPTY) {
+        operation = &groupReadOperation;
+        readOperation = true;
+    }
+    if (operation == nullptr ||
+        operation->request.mainLocalId != group.mainLocalId ||
+        operation->request.mainCoreId != group.mainCoreId ||
+        (readOperation && operation->request.action != GroupProtocolAction::LIST &&
+         operation->request.action != GroupProtocolAction::GET)) {
+        (void)xSemaphoreGive(groupStateMutex);
+        return;
+    }
+    GroupRegistry* readSnapshot = readOperation
+        ? &groupReadOperation.snapshot : nullptr;
+
+    if (isGroupPowerOperation(*operation)) {
+        const CoreGroupOperationState previousState = operation->state;
+        if (group.version != GROUP_POWER_PROTOCOL_VERSION ||
+            group.groupId != operation->request.groupId ||
+            group.power != operation->request.power ||
+            ((operation->state == CoreGroupOperationState::COMPLETED ||
+              operation->state == CoreGroupOperationState::FAILED) &&
+             operation->receivedGroupCount >= operation->expectedGroupCount)) {
+            (void)xSemaphoreGive(groupStateMutex);
+            return;
+        }
+        bool terminal = false;
+        uint32_t uncertainMainCoreId = 0;
+        uint32_t uncertainOperationStartedAt = 0;
+        uint32_t uncertainLampIds[MAX_GROUP_LAMPS] = {};
+        uint8_t uncertainLampCount = 0;
+        if (group.action == GroupProtocolAction::RESULT) {
+            operation->result = group.result;
+            operation->resultRevision = 0;
+            if (group.groupCount <= MAX_GROUP_LAMPS &&
+                (operation->expectedGroupCount == 0 ||
+                 group.groupCount == operation->expectedGroupCount)) {
+                operation->expectedGroupCount = group.groupCount;
+            }
+            if (group.result == GroupProtocolResult::ACCEPTED) {
+                if (activeGroupOperationId == 0 ||
+                    activeGroupOperationId == operation->id) {
+                    const bool resumingUncertain =
+                        operation->state == CoreGroupOperationState::UNCERTAIN;
+                    operation->state = CoreGroupOperationState::ACCEPTED;
+                    if (resumingUncertain) {
+                        operation->startedAt = millis();
+                        operation->lastQueryAt = operation->startedAt;
+                        operation->statusQueryCount = 0;
+                    }
+                    activeGroupOperationId = operation->id;
+                }
+            } else if (group.result == GroupProtocolResult::COMPLETED ||
+                       group.result == GroupProtocolResult::PARTIAL) {
+                operation->mainFinalResultReceived = true;
+                if (operation->expectedGroupCount == 0) {
+                    operation->state = CoreGroupOperationState::UNCERTAIN;
+                    operation->result = GroupProtocolResult::UNCERTAIN;
+                } else if (operation->receivedGroupCount ==
+                           operation->expectedGroupCount) {
+                    updateGroupPowerAggregate(*operation);
+                    terminal = groupOperationTerminal(operation->state);
+                } else {
+                    operation->state = CoreGroupOperationState::ACCEPTED;
+                }
+            } else if (group.result == GroupProtocolResult::UNCERTAIN) {
+                operation->state = CoreGroupOperationState::UNCERTAIN;
+                terminal = true;
+                if (isGroupPowerOperation(*operation)) {
+                    for (uint8_t memberIndex = 0;
+                         memberIndex < MAX_GROUP_LAMPS; ++memberIndex) {
+                        CoreGroupMemberResult& member = operation->members[memberIndex];
+                        if (member.valid && member.result ==
+                                GroupProtocolResult::IN_PROGRESS) {
+                            member.result = GroupProtocolResult::UNCERTAIN;
+                            if (uncertainLampCount < MAX_GROUP_LAMPS)
+                                uncertainLampIds[uncertainLampCount++] =
+                                    member.localId;
+                        }
+                    }
+                    uncertainMainCoreId = operation->request.mainCoreId;
+                    uncertainOperationStartedAt = operation->startedAt;
+                }
+            } else if (group.result == GroupProtocolResult::NOT_FOUND ||
+                       group.result == GroupProtocolResult::EMPTY_GROUP ||
+                       group.result == GroupProtocolResult::BUSY ||
+                       group.result == GroupProtocolResult::INVALID ||
+                       group.result == GroupProtocolResult::FAILED) {
+                operation->state = CoreGroupOperationState::FAILED;
+                terminal = true;
+            }
+        } else if (group.action == GroupProtocolAction::MEMBER_RESULT &&
+                   group.groupCount > 0 &&
+                   group.groupCount <= MAX_GROUP_LAMPS &&
+                   group.memberOffset < group.groupCount &&
+                   (operation->expectedGroupCount == 0 ||
+                    operation->expectedGroupCount == group.groupCount)) {
+            operation->expectedGroupCount = group.groupCount;
+            CoreGroupMemberResult& member = operation->members[group.memberOffset];
+            if (!member.valid) {
+                bool duplicateLocal = false;
+                for (uint8_t index = 0; index < MAX_GROUP_LAMPS; ++index)
+                    if (operation->members[index].valid &&
+                        operation->members[index].localId == group.memberLocalId)
+                        duplicateLocal = true;
+                bool duplicateChild = false;
+                for (uint8_t index = 0; index < MAX_GROUP_LAMPS; ++index)
+                    if (operation->members[index].valid &&
+                        operation->members[index].childCommandId == group.childCommandId)
+                        duplicateChild = true;
+                if (!duplicateLocal && !duplicateChild && group.memberLocalId != 0 &&
+                    group.childCommandId != 0) {
+                    member.localId = group.memberLocalId;
+                    member.childCommandId = group.childCommandId;
+                    member.index = group.memberOffset;
+                    member.result = group.result;
+                    member.valid = true;
+                    ++operation->receivedGroupCount;
+                }
+            } else if (member.localId == group.memberLocalId &&
+                       member.childCommandId == group.childCommandId) {
+                if (member.result == GroupProtocolResult::IN_PROGRESS ||
+                    member.result == group.result) {
+                    member.result = group.result;
+                } else if (group.result == GroupProtocolResult::SUPERSEDED ||
+                           (member.result == GroupProtocolResult::UNCERTAIN &&
+                            isGroupMemberResultTerminal(group.result))) {
+                    member.result = group.result;
+                } else {
+                    (void)xSemaphoreGive(groupStateMutex);
+                    return;
+                }
+            }
+            const bool updateLampOutput = member.valid &&
+                (group.result == GroupProtocolResult::EXECUTED ||
+                 group.result == GroupProtocolResult::UNCERTAIN);
+            const uint32_t resultLampLocalId = group.memberLocalId;
+            const GroupProtocolResult resultForLamp = group.result;
+            const bool requestedPower = group.power != 0;
+            const uint32_t operationStartedAt = operation->startedAt;
+            if (operation->state == CoreGroupOperationState::SENT)
+                operation->state = CoreGroupOperationState::ACCEPTED;
+            updateGroupPowerAggregate(*operation);
+            terminal = groupOperationTerminal(operation->state);
+            const uint32_t resultMainCoreId = group.mainCoreId;
+            updateGroupOperationRetention(*operation, previousState, millis());
+            if (terminal && activeGroupOperationId == operation->id)
+                activeGroupOperationId = 0;
+            (void)xSemaphoreGive(groupStateMutex);
+            if (updateLampOutput && registryMutex != nullptr &&
+                *registryMutex != nullptr &&
+                xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                commands.applyGroupPowerResult(resultMainCoreId,
+                    resultLampLocalId, requestedPower, operationStartedAt,
+                    resultForLamp);
+                (void)xSemaphoreGive(*registryMutex);
+            }
+            return;
+        }
+        if (terminal && activeGroupOperationId == operation->id)
+            activeGroupOperationId = 0;
+        updateGroupOperationRetention(*operation, previousState, millis());
+        (void)xSemaphoreGive(groupStateMutex);
+        if (uncertainLampCount != 0 && registryMutex != nullptr &&
+            *registryMutex != nullptr &&
+            xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            for (uint8_t index = 0; index < uncertainLampCount; ++index) {
+                commands.applyGroupPowerResult(uncertainMainCoreId,
+                    uncertainLampIds[index], false, uncertainOperationStartedAt,
+                    GroupProtocolResult::UNCERTAIN);
+            }
+            (void)xSemaphoreGive(*registryMutex);
+        }
+        return;
+    }
+
+    if (operation->state == CoreGroupOperationState::PERSISTED ||
+        operation->state == CoreGroupOperationState::COMPLETED ||
+        operation->state == CoreGroupOperationState::FAILED ||
+        operation->state == CoreGroupOperationState::UNCERTAIN) {
+        (void)xSemaphoreGive(groupStateMutex);
+        return;
+    }
+
+    const CoreGroupOperationState previousState = operation->state;
+    bool terminal = false;
+    if (group.action == GroupProtocolAction::RESULT) {
+        operation->result = group.result;
+        operation->resultRevision = group.expectedRevision;
+        if (group.result == GroupProtocolResult::ACCEPTED) {
+            operation->state = CoreGroupOperationState::ACCEPTED;
+        } else if (group.result == GroupProtocolResult::PERSISTED &&
+                   operation->request.action != GroupProtocolAction::LIST &&
+                   operation->request.action != GroupProtocolAction::GET) {
+            operation->state = CoreGroupOperationState::PERSISTED;
+            terminal = true;
+        } else if (group.result == GroupProtocolResult::COMPLETED &&
+                   operation->request.action == GroupProtocolAction::GET &&
+                   operation->receivedGroupCount == 1 &&
+                   readSnapshot != nullptr &&
+                   operation->receivedMembersForCurrent ==
+                       readSnapshot->groups[0].lampCount) {
+            operation->state = CoreGroupOperationState::COMPLETED;
+            terminal = true;
+        } else if (group.result == GroupProtocolResult::NOT_FOUND ||
+                   group.result == GroupProtocolResult::REVISION_CONFLICT ||
+                   group.result == GroupProtocolResult::INVALID ||
+                   group.result == GroupProtocolResult::STORAGE_UNAVAILABLE ||
+                   group.result == GroupProtocolResult::BUSY ||
+                   group.result == GroupProtocolResult::FAILED ||
+                   group.result == GroupProtocolResult::UNCERTAIN) {
+            operation->state = group.result == GroupProtocolResult::UNCERTAIN
+                ? CoreGroupOperationState::UNCERTAIN
+                : CoreGroupOperationState::FAILED;
+            terminal = true;
+        }
+    } else if (group.action == GroupProtocolAction::LIST_BEGIN &&
+               operation->request.action == GroupProtocolAction::LIST &&
+               group.groupCount <= MAX_GROUPS && !operation->listStarted) {
+        if (readSnapshot == nullptr) {
+            (void)xSemaphoreGive(groupStateMutex);
+            return;
+        }
+        *readSnapshot = {};
+        readSnapshot->mainId = group.mainCoreId;
+        operation->expectedGroupCount = group.groupCount;
+        operation->receivedGroupCount = 0;
+        operation->receivedMembersForCurrent = 0;
+        operation->listStarted = true;
+        operation->state = CoreGroupOperationState::ACCEPTED;
+    } else if (group.action == GroupProtocolAction::GROUP_META &&
+               (operation->request.action == GroupProtocolAction::LIST ||
+                operation->request.action == GroupProtocolAction::GET)) {
+        const bool listReady = operation->request.action == GroupProtocolAction::LIST
+            ? operation->listStarted &&
+                operation->receivedGroupCount < operation->expectedGroupCount
+            : operation->listStarted && operation->receivedGroupCount == 0;
+        const bool previousComplete = operation->receivedGroupCount == 0 ||
+            operation->receivedMembersForCurrent ==
+                readSnapshot->groups[operation->receivedGroupCount - 1].lampCount;
+        const bool targetMatches = operation->request.action != GroupProtocolAction::GET ||
+            operation->request.groupId == group.groupId;
+        if (listReady && previousComplete && targetMatches && group.groupId != 0 &&
+            group.expectedRevision != 0 && group.memberCount <= MAX_GROUP_LAMPS) {
+            bool duplicateId = false;
+            for (uint8_t index = 0; index < operation->receivedGroupCount; ++index)
+                if (readSnapshot->groups[index].id == group.groupId)
+                    duplicateId = true;
+            LampGroup candidate = {};
+            candidate.id = group.groupId;
+            candidate.revision = group.expectedRevision;
+            candidate.lampCount = group.memberCount;
+            if (!duplicateId && setGroupName(candidate, group.name)) {
+                readSnapshot->groups[operation->receivedGroupCount] = candidate;
+                ++operation->receivedGroupCount;
+                readSnapshot->count = operation->receivedGroupCount;
+                operation->receivedMembersForCurrent = 0;
+                operation->state = CoreGroupOperationState::ACCEPTED;
+            }
+        }
+    } else if (group.action == GroupProtocolAction::MEMBER_CHUNK &&
+               (operation->request.action == GroupProtocolAction::LIST ||
+                operation->request.action == GroupProtocolAction::GET) &&
+               operation->receivedGroupCount != 0) {
+        LampGroup& current = readSnapshot->groups[
+            operation->receivedGroupCount - 1];
+        bool validChunk = group.groupId == current.id && group.memberCount != 0 &&
+            group.memberOffset == operation->receivedMembersForCurrent &&
+            static_cast<uint16_t>(group.memberOffset) + group.memberCount <=
+                current.lampCount;
+        for (uint8_t index = 0; validChunk && index < group.memberCount; ++index) {
+            const uint32_t memberId = group.memberIds[index];
+            if (memberId == 0) { validChunk = false; break; }
+            for (uint8_t prior = 0; prior < operation->receivedMembersForCurrent; ++prior)
+                if (current.lampIds[prior] == memberId) validChunk = false;
+            for (uint8_t prior = 0; prior < index; ++prior)
+                if (group.memberIds[prior] == memberId) validChunk = false;
+        }
+        if (validChunk) {
+            for (uint8_t index = 0; index < group.memberCount; ++index)
+                current.lampIds[operation->receivedMembersForCurrent + index] =
+                    group.memberIds[index];
+            operation->receivedMembersForCurrent = static_cast<uint8_t>(
+                operation->receivedMembersForCurrent + group.memberCount);
+        }
+    } else if (group.action == GroupProtocolAction::LIST_END &&
+               operation->request.action == GroupProtocolAction::LIST &&
+               operation->listStarted && group.groupCount == operation->expectedGroupCount &&
+               operation->receivedGroupCount == operation->expectedGroupCount &&
+               (operation->receivedGroupCount == 0 ||
+                operation->receivedMembersForCurrent ==
+                    readSnapshot->groups[operation->receivedGroupCount - 1].lampCount)) {
+        operation->result = GroupProtocolResult::COMPLETED;
+        operation->state = CoreGroupOperationState::COMPLETED;
+        terminal = true;
+    }
+
+    updateGroupOperationRetention(*operation, previousState, millis());
+    if (terminal && activeGroupOperationId == operation->id)
+        activeGroupOperationId = 0;
+    (void)xSemaphoreGive(groupStateMutex);
+}
+
+void CoreHttpApi::pollGroupOperations(uint32_t now) {
+    if (groupStateMutex == nullptr ||
+        xSemaphoreTake(groupStateMutex, pdMS_TO_TICKS(10)) != pdTRUE) return;
+    uint32_t uncertainMainCoreId = 0;
+    uint32_t uncertainOperationStartedAt = 0;
+    uint32_t uncertainLampIds[MAX_GROUP_LAMPS] = {};
+    uint8_t uncertainLampCount = 0;
+    if (activeGroupOperationId != 0) {
+        for (uint8_t index = 0; index < CORE_GROUP_OPERATION_SLOTS; ++index) {
+            CoreGroupOperationRecord& operation = groupOperations[index];
+            if (operation.id == activeGroupOperationId &&
+                operation.state == CoreGroupOperationState::UNCERTAIN &&
+                now - operation.lastQueryAt >=
+                    GROUP_POWER_STATUS_QUERY_TIMEOUT_MS) {
+                activeGroupOperationId = 0;
+            } else if (operation.id == activeGroupOperationId &&
+                (operation.state == CoreGroupOperationState::SENT ||
+                 operation.state == CoreGroupOperationState::ACCEPTED)) {
+                const bool powerOperation = isGroupPowerOperation(operation);
+                if (powerOperation && operation.statusQueryCount < 2 &&
+                    now - operation.lastQueryAt >= GROUP_POWER_STATUS_REQUERY_MS) {
+                    CoreLinkPacket replay = {};
+                    replay.sequence = static_cast<uint16_t>(operation.id);
+                    replay.type = CoreLinkMessageType::GROUPS;
+                    replay.group = operation.request;
+                    replay.group.action = GroupProtocolAction::QUERY_OPERATION;
+                    if (uart.send(replay)) {
+                        ++operation.statusQueryCount;
+                        operation.lastQueryAt = now;
+                    }
+                }
+                const uint32_t timeout = powerOperation
+                    ? GROUP_POWER_OPERATION_TIMEOUT_MS : GROUP_OPERATION_TIMEOUT_MS;
+                if (now - operation.startedAt >= timeout) {
+                    operation.state = CoreGroupOperationState::UNCERTAIN;
+                    operation.result = GroupProtocolResult::UNCERTAIN;
+                    operation.retainedAt = now;
+                    if (powerOperation) {
+                        uncertainMainCoreId = operation.request.mainCoreId;
+                        uncertainOperationStartedAt = operation.startedAt;
+                        for (uint8_t member = 0; member < MAX_GROUP_LAMPS; ++member) {
+                            if (operation.members[member].valid &&
+                                operation.members[member].result ==
+                                    GroupProtocolResult::IN_PROGRESS) {
+                                operation.members[member].result =
+                                    GroupProtocolResult::UNCERTAIN;
+                                uncertainLampIds[uncertainLampCount++] =
+                                    operation.members[member].localId;
+                            }
+                        }
+                    }
+                    activeGroupOperationId = 0;
+                    break;
+                }
+            }
+        }
+    }
+    (void)xSemaphoreGive(groupStateMutex);
+    if (uncertainLampCount != 0 && registryMutex != nullptr &&
+        *registryMutex != nullptr &&
+        xSemaphoreTake(*registryMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        for (uint8_t index = 0; index < uncertainLampCount; ++index) {
+            commands.applyGroupPowerResult(uncertainMainCoreId,
+                uncertainLampIds[index], false, uncertainOperationStartedAt,
+                GroupProtocolResult::UNCERTAIN);
+        }
+        (void)xSemaphoreGive(*registryMutex);
+    }
+}
+
 void CoreHttpApi::handlePairingPacket(const CoreLinkPacket& packet) {
     if (packet.type != CoreLinkMessageType::PAIRING ||
         registryMutex == nullptr || *registryMutex == nullptr ||
@@ -1256,8 +2454,13 @@ void CoreHttpApi::pollPairing(uint32_t now) {
 bool CoreHttpApi::begin() {
     if (started) return true;
     if (registryMutex == nullptr || *registryMutex == nullptr) return false;
+    if (groupStateMutex == nullptr) groupStateMutex = xSemaphoreCreateMutex();
+    if (groupStateMutex == nullptr)
+        Serial.println("[CORE-WIFI] group API state mutex unavailable");
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    // Group requests keep bounded snapshots in the HTTP handler's stack frame.
+    config.stack_size = 8192;
     config.uri_match_fn = httpd_uri_match_wildcard;
 
     if (httpd_start(&server, &config) != ESP_OK) {
@@ -1289,6 +2492,9 @@ bool CoreHttpApi::isReady() const {
 esp_err_t CoreHttpApi::handleRequest(httpd_req_t* request) {
     if (request == nullptr || request->user_ctx == nullptr) return ESP_FAIL;
     CoreHttpApi* api = static_cast<CoreHttpApi*>(request->user_ctx);
+    const GroupRoute groupRoute = parseGroupRoute(request->uri);
+    if (groupRoute.kind != GroupRouteKind::NONE)
+        return api->handleGroupRequest(request);
     const RemovalRoute removalRoute = parseRemovalRoute(request->uri);
     if (removalRoute.kind != RemovalRouteKind::NONE)
         return api->handleRemovalRequest(request);
@@ -1366,11 +2572,15 @@ CoreHttpApi::CoreHttpApi(DeviceRegistry& coreRegistry,
       registryMutex(&coreRegistryMutex), removalOperationId(0),
       removalTargetId(0), removalMainLocalId(0), removalMainCoreId(0),
       removalLampLocalId(0), removalLastQueryAt(0),
-      removalResult(CorePairingResultCode::NONE), started(false) {}
+      removalResult(CorePairingResultCode::NONE), groupStateMutex(nullptr),
+      activeGroupOperationId(0), nextGroupOperationSlot(0), groupReadOperation{},
+      started(false) {}
 
 bool CoreHttpApi::begin() { return false; }
 bool CoreHttpApi::isReady() const { return started; }
 void CoreHttpApi::handlePairingPacket(const CoreLinkPacket&) {}
+void CoreHttpApi::handleGroupPacket(const CoreLinkPacket&) {}
 void CoreHttpApi::pollPairing(uint32_t) {}
+void CoreHttpApi::pollGroupOperations(uint32_t) {}
 
 #endif
